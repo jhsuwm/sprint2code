@@ -1,0 +1,163 @@
+company_name: "LunarXpress"
+# Frontend Technical Configuration
+github_repository: https://github.com/jhsuwm/lunarxpress-customer-service-frontend.git
+
+# =============================================================================
+# 🚨 MANDATORY COMPLIANCE DIRECTIVE - HIGHEST PRIORITY! 🚨
+# =============================================================================
+mandatory_compliance_directive:
+  critical_instruction: "🚫 FORBIDDEN: NEVER skip, ignore, or overlook ANY rule, specification, or requirement in this YAML configuration file!"
+  enforcement: "EVERY section, rule, example, and requirement in this file is MANDATORY and MUST be followed EXACTLY"
+  scope: "This applies to ALL frontend sections including but not limited to styling, components, and state management"
+  
+  verification_checklist:
+    step1: "Read this ENTIRE YAML config BEFORE generating ANY code"
+    step2: "Reference the config for EVERY file you generate"
+    step3: "Cross-check your imports against the config's import rules"
+    step4: "Confirm file structure matches the directory_structure requirements"
+  
+  golden_rule: "When in doubt, RE-READ the relevant section of this config. NEVER assume. ALWAYS verify against this config!"
+
+# =============================================================================
+# 🚨 ABSOLUTE CODE GENERATION ORDER - FRONTEND 🚨
+# =============================================================================
+absolute_code_generation_order:
+  mandatory_generation_sequence:
+    frontend_typescript:
+      step1: "types/ - Generate ALL TypeScript type definitions"
+      step2: "api/ - Generate API client functions"
+      step3: "store/ - Generate Zustand stores"
+      step4: "components/ - Generate reusable components"
+      step5: "pages/ - Generate page components"
+      step6: "App.tsx - Generate main app with routing"
+  
+  golden_rule_code_generation: "ALWAYS generate dependencies BEFORE dependents. Types → API → Store → Components → Pages."
+
+# =============================================================================
+# 🚨 PROPERTY NAMING CONSISTENCY - MANDATORY! 🚨
+# =============================================================================
+property_naming_consistency:
+  critical_instruction: "🚫 FORBIDDEN: NEVER use different property names in types vs usage!"
+  mandatory_naming_rules:
+    rule1: "If you define a property as 'cargoId' in the type, you MUST use 'cargoId' everywhere (components, forms, API calls)"
+    rule2: "NEVER invent new property names when implementing components - ALWAYS reference the type definition"
+    rule3: "Property names are CASE-SENSITIVE: 'userId' ≠ 'userid' ≠ 'UserId'"
+  golden_rule_property_naming: "Property names in types, components, forms, and API calls MUST be IDENTICAL."
+
+# =============================================================================
+# 🚨 TYPESCRIPT ENUM COMPARISON - MANDATORY! 🚨
+# =============================================================================
+typescript_enum_comparison_rules:
+  critical_instruction: "🚫 FORBIDDEN: NEVER compare enum values against string literals!"
+  recommendation: "For frontend UI code, prefer type unions over enums to avoid comparison errors"
+  golden_rule_enums: "If you use enum types, you MUST compare with enum members (TicketPriority.URGENT). If you want to use string literals ('urgent'), use type unions instead of enums!"
+
+# 1. DEPENDENCY GOLDEN RULE (MANDATORY)
+# -----------------------------------------------------------------------------
+dependency_golden_rule:
+  rule: "🚫 CRITICAL: Whenever you import a library that is not a built-in React/Next.js library, you MUST immediately add it to 'frontend/package.json' in the same response."
+  checklist:
+    - "axios: ^1.6.0 (REQUIRED for all API calls)"
+    - "zod: ^3.22.0 (REQUIRED for validation)"
+    - "react-hook-form: ^7.48.0 (REQUIRED for forms)"
+    - "@hookform/resolvers: ^3.3.0 (REQUIRED when using zod)"
+
+# =============================================================================
+# FRONTEND FRAMEWORK: NEXT.JS (CRITICAL)
+# =============================================================================
+frontend_framework:
+  name: "Next.js"
+  rules:
+    - "Build command MUST be 'next build'"
+    - "Output directory is '.next/standalone'"
+    - "🚫 NEVER use 'react-router-dom' - Next.js has its own routing system!"
+    - "🚫 NEVER create nginx.conf file - Next.js uses Node.js server, NOT Nginx!"
+  golden_rule_dockerfile: "Next.js = Node.js server. NEVER use Nginx for Next.js apps!"
+
+# =============================================================================
+# FRONTEND CONFIGURATION
+# =============================================================================
+frontend:
+  framework: nextjs
+  language: typescript
+  
+  styling:
+    library: tailwindcss
+    critical_visibility_rules:
+      solution: "ALWAYS add background colors AND text colors to make content visible"
+      mandatory_styling:
+        - "Root/container divs MUST have background color (bg-white, bg-gray-100, etc.)"
+        - "Text elements MUST have text color (text-gray-900, text-black, etc.)"
+  
+  directory_structure:
+    pages_structure:
+      critical: "🚫 CRITICAL: ALL page components MUST be at src/pages/ TOP LEVEL!"
+      rule: "NO subdirectories in pages/ - keep it flat for simple imports"
+  
+  typescript_types:
+    golden_rule_types: "If a type file USES a type (TicketStatus, TicketPriority), it MUST EXPORT that type too!"
+  
+  api_client:
+    library: axios
+    base_url: "/api"
+    critical_api_completeness:
+      rule: "ALL imported API functions must be exported - no missing functions allowed"
+  
+  forms:
+    library: react-hook-form
+    validation: zod
+    critical_form_implementation:
+      rule: "ALWAYS use React controlled forms with useState and onSubmit handlers. NEVER use HTML form submissions."
+  
+  build_tool:
+    bundler: nextjs
+    critical_public_directory:
+      rule: "ALWAYS create public directory with at minimum a .gitkeep file. Docker build FAILS without public directory!"
+
+# =============================================================================
+# TESTING CONFIGURATION
+# =============================================================================
+testing:
+  frontend_testing:
+    unit_tests:
+      framework: jest
+      library: "@testing-library/react"
+    e2e_tests:
+      framework: playwright
+
+# =============================================================================
+# CODE QUALITY CONFIGURATION
+# =============================================================================
+code_quality:
+  frontend:
+    linter: eslint
+    formatter: prettier
+    type_checker: typescript
+
+# =============================================================================
+# SECURITY REQUIREMENTS
+# =============================================================================
+security:
+  authentication:
+    - "Implement JWT-based authentication"
+    - "Store tokens securely (localStorage or secure storage)"
+    - "Include Authorization header in all API requests"
+
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+troubleshooting:
+  frontend_build_failures:
+    checks:
+      - "Missing public/ Directory: Docker build FAILS without it!"
+      - "Dependency Mismatch: Check package.json."
+      - "TypeScript Errors: Compilation fails if there are type errors."
+      - "ESM vs CommonJS: Config files MUST use export default."
+
+# =============================================================================
+# IMPLEMENTATION GUIDELINES
+# =============================================================================
+implementation_guidelines:
+  frontend:
+    critical_startup_files:
+      - "⚠️ MANDATORY: Create next.config.js, layout.tsx, page.tsx, public/.gitkeep, tsconfig.json, tailwind.config.js, postcss.config.js, globals.css"

@@ -136,6 +136,7 @@ celerybeat.pid
 
 # Environments
 .env
+backend/.env
 .envrc
 .venv
 env/
@@ -205,3 +206,62 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Frontend packages
+frontend/node_modules/
+
+# Next.js build output
+frontend/.next/
+frontend/out/
+
+# Frontend environment files
+frontend/.env*.local
+frontend/.env.production
+
+# System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Log files
+*.log
+backend.log
+agent_execution.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Temporary files
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# IDE files (extended)
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Process ID files
+*.pid
+.orion-orchestrator-pids
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Secret/credential files
+*secret*.json
+*credentials*.json
+service-account*.json
+
+# Test coverage
+.nyc_output/
+coverage/

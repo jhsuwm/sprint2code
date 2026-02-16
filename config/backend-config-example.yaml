@@ -1,0 +1,135 @@
+company_name: "LunarXpress"
+# Backend Technical Configuration
+github_repository: https://github.com/jhsuwm/lunarxpress-customer-service-backend.git
+
+# =============================================================================
+# 🚨 MANDATORY COMPLIANCE DIRECTIVE - HIGHEST PRIORITY! 🚨
+# =============================================================================
+mandatory_compliance_directive:
+  critical_instruction: "🚫 FORBIDDEN: NEVER skip, ignore, or overlook ANY rule, specification, or requirement in this YAML configuration file!"
+  enforcement: "EVERY section, rule, example, and requirement in this file is MANDATORY and MUST be followed EXACTLY"
+  scope: "This applies to ALL backend sections including but not limited to routes, services, and models"
+  
+  verification_checklist:
+    step1: "Read this ENTIRE YAML config BEFORE generating ANY code"
+    step2: "Reference the config for EVERY file you generate"
+    step3: "Cross-check your imports against the config's import rules"
+    step4: "Confirm file structure matches the directory_structure requirements"
+  
+  golden_rule: "When in doubt, RE-READ the relevant section of this config. NEVER assume. ALWAYS verify against this config!"
+
+# =============================================================================
+# 🚨 ABSOLUTE CODE GENERATION ORDER - BACKEND 🚨
+# =============================================================================
+absolute_code_generation_order:
+  mandatory_generation_sequence:
+    backend_python:
+      step1: "models/ - Generate ALL Pydantic model classes (User, Ticket, etc.)"
+      step2: "auth/ - Generate auth utilities (jwt_utils.py, auth_utils.py, dependencies.py)"
+      step3: "database/ - Generate database clients (firestore_client.py)"
+      step4: "services/ - Generate business logic (auth_service.py, ticket_service.py)"
+      step5: "routes/ - Generate API endpoints (auth_routes.py, ticket_routes.py)"
+      step6: "main.py - Generate main FastAPI app (MUST include ALL routers with /api/v1 prefix)"
+  
+  golden_rule_code_generation: "ALWAYS generate dependencies BEFORE dependents. Models → Services → Routes."
+
+# 2. PYTHON IMPORT GOLDEN RULE (MANDATORY)
+# -----------------------------------------------------------------------------
+python_import_golden_rule:
+  rule: "🚫 FORBIDDEN: NEVER import a class/function unless it is ALREADY DEFINED in the source file."
+  critical_model_import_rule:
+    rule: "If a test imports 'TicketMessage' from 'models.ticket', then 'class TicketMessage(BaseModel)' MUST already exist in 'models/ticket.py'"
+  critical_custom_exception_rule:
+    rule: "Custom exception classes must be defined in the file that raises them"
+  golden_rule_models: "Generate models file with ALL models BEFORE generating ANY files that import from it!"
+
+# =============================================================================
+# BACKEND CONFIGURATION
+# =============================================================================
+backend:
+  framework: fastapi
+  language: python
+  python_version: "3.11"
+  
+  critical_python_import_rules:
+    rule: "ALWAYS use relative imports within the backend package (e.g., from services.X, NOT from backend.services.X)"
+    required_typing_imports:
+      rule: "If you use Optional, List, Dict, Any, Union, etc. in type hints, you MUST import them from typing"
+  
+  dependencies:
+    critical_package_versions:
+      rule: "🚫 CRITICAL: MUST pin these exact versions to ensure compatibility"
+      required_versions:
+        - "fastapi==0.109.0"
+        - "pydantic==2.5.0"
+        - "pydantic-settings==2.1.0"
+        - "python-jose[cryptography]==3.3.0"
+        - "passlib[bcrypt]==1.7.4"
+        - "uvicorn[standard]==0.25.0"
+      reason: "These versions are tested and compatible. DO NOT use 'fastapi' without version - it causes runtime errors!"
+  
+  database:
+    provider: firestore
+    critical_initialization_pattern:
+      rule: "Use lazy initialization pattern - create client when first needed, not at import time. NEVER instantiate database clients at module level!"
+  
+  authentication:
+    method: jwt
+    algorithm: HS256
+    critical_import_error: "🚫 CRITICAL: MUST USE: 'from jose import jwt' (NOT 'import jwt')"
+    required_file_structure:
+      auth_directory_files:
+        - "auth/auth_utils.py - Password hashing"
+        - "auth/jwt_utils.py - JWT token creation/verification"
+        - "auth/dependencies.py - MUST include 'get_current_user'"
+
+# =============================================================================
+# TESTING CONFIGURATION
+# =============================================================================
+testing:
+  backend_testing:
+    unit_tests:
+      framework: pytest
+    integration_tests:
+      framework: pytest
+      library: httpx
+
+# =============================================================================
+# CODE QUALITY CONFIGURATION
+# =============================================================================
+code_quality:
+  backend:
+    linter: ruff
+    formatter: black
+    type_checker: mypy
+
+# =============================================================================
+# SECURITY REQUIREMENTS
+# =============================================================================
+security:
+  api_security:
+    - "Validate all inputs with Pydantic"
+    - "Sanitize user inputs"
+    - "Implement rate limiting"
+    - "Set secure CORS policies"
+
+# =============================================================================
+# TROUBLESHOOTING
+# =============================================================================
+troubleshooting:
+  backend_deployment_failures:
+    checks:
+      - "ImportError / NameError: Check if you are importing classes that are not defined."
+      - "ModuleNotFoundError: Check requirements.txt."
+      - "Firestore Connection: Verify Google Cloud Project ID."
+
+# =============================================================================
+# IMPLEMENTATION GUIDELINES
+# =============================================================================
+implementation_guidelines:
+  backend:
+    critical_startup_files:
+      - "⚠️ MANDATORY: Create start_backend.sh script for easy backend startup"
+    best_practices:
+      - "Separate concerns (routes, services, database)"
+      - "Use dependency injection"
