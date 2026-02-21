@@ -220,6 +220,12 @@ class DeploymentValidator:
 
         package_import_pattern = r'import\s+.*\s+from\s+["\']([^./][^"\']+)["\']'
         internal_import_pattern = r'import\s+{(?P<members>[^}]+)}\s+from\s+["\'](?P<path>[^"\']+)["\']'
+        node_builtin_modules = {
+            'assert', 'buffer', 'child_process', 'cluster', 'console', 'constants', 'crypto',
+            'dgram', 'dns', 'domain', 'events', 'fs', 'http', 'https', 'module', 'net',
+            'os', 'path', 'process', 'punycode', 'querystring', 'readline', 'repl', 'stream',
+            'string_decoder', 'timers', 'tls', 'tty', 'url', 'util', 'v8', 'vm', 'worker_threads', 'zlib'
+        }
         function_sigs = {}
 
         for rel_path, full_path in file_map.items():
@@ -250,6 +256,8 @@ class DeploymentValidator:
                     matches = re.findall(package_import_pattern, content)
                     for pkg in matches:
                         package_name = f"{pkg.split('/')[0]}/{pkg.split('/')[1]}" if pkg.startswith('@') and len(pkg.split('/')) >= 2 else pkg.split('/')[0]
+                        if package_name in node_builtin_modules:
+                            continue
                         if package_name and not package_name.startswith(('node:', '.', '@/')):
                             if package_name not in all_dependencies:
                                 errors.append(f"Missing dependency: '{package_name}' is imported but not in package.json")
@@ -342,6 +350,43 @@ class DeploymentValidator:
         if any(p.startswith('google-') for p in installed_packages):
             installed_packages.add('google')
 
+        # CRITICAL: Check for pip-incompatible lines that would cause startup failure.
+        # AI-generated requirements.txt files sometimes include code-block separator lines
+        # like '---', '===', '```', or AI output format markers like 'FILE_PATH: ...'
+        # which cause: ERROR: Invalid requirement: ---
+        def _is_invalid_req_line(s: str) -> bool:
+            """Return True for any line that is not a valid pip requirement spec."""
+            if not s or s.startswith('#'):
+                return False
+            # Explicit code-block / code-gen format markers
+            if s.startswith('```') or s.startswith('FILE_PATH:'):
+                return True
+            # Pure separator lines: ---, ===, etc.
+            if re.match(r'^-{3,}$', s) or re.match(r'^={3,}$', s):
+                return True
+            # Python keywords that start code statements
+            # (from X import Y  /  import X  /  class X  /  def X ...)
+            if re.match(r'^(from|import|class|def|return|if|else|elif|for|while|try|except|with|raise|assert|pass)\s', s):
+                return True
+            # Any line containing whitespace that is NOT a pip option (-r, -e, -i, --...)
+            # or a URL (contains ://). Valid pip specifiers never have bare spaces.
+            if ' ' in s and not s.startswith('-') and '://' not in s:
+                return True
+            return False
+
+        try:
+            with open(req_path, 'r') as f:
+                for line in f:
+                    stripped = line.strip()
+                    if _is_invalid_req_line(stripped):
+                        errors.append(
+                            f"Invalid pip requirement in 'requirements.txt': "
+                            f"'{stripped}' is not a valid pip package spec - "
+                            f"remove this line (it is a code-block marker, not a package)"
+                        )
+        except Exception:
+            pass
+
         std_lib = set(sys.stdlib_module_names) if hasattr(sys, 'stdlib_module_names') else set()
         
         # Common mappings from import name to package name
@@ -349,6 +394,9 @@ class DeploymentValidator:
             'dotenv': 'python-dotenv',
             'jose': 'python-jose',
             'jwt': 'PyJWT',
+            'pydantic_settings': 'pydantic-settings',
+            'firebase_admin': 'firebase-admin',
+            'email_validator': 'email-validator',
             'google.cloud.firestore': 'google-cloud-firestore',
             'google.cloud.storage': 'google-cloud-storage',
             'google.cloud.secretmanager': 'google-cloud-secret-manager',
@@ -360,6 +408,34 @@ class DeploymentValidator:
             'sklearn': 'scikit-learn',
             'bs4': 'beautifulsoup4'
         }
+        dotted_import_prefix_mapping = {
+            'google.cloud.firestore': 'google-cloud-firestore',
+            'google.cloud.storage': 'google-cloud-storage',
+            'google.cloud.secretmanager': 'google-cloud-secret-manager',
+            'google.api_core': 'google-api-core',
+        }
+
+        def _map_import_to_package(import_name: str) -> str:
+            """Resolve full import path to the most specific package name."""
+            if import_name in import_mapping:
+                return import_mapping[import_name]
+            for prefix, package in dotted_import_prefix_mapping.items():
+                if import_name == prefix or import_name.startswith(prefix + '.'):
+                    return package
+            top_level = import_name.split('.')[0]
+            return import_mapping.get(top_level, top_level)
+
+        def _is_package_installed(package_name: str) -> bool:
+            """Check package name against common naming variants in requirements."""
+            normalized = package_name.lower()
+            candidates = {
+                normalized,
+                normalized.replace('_', '-'),
+                normalized.replace('-', '_'),
+                f"python-{normalized}",
+                normalized.split('[')[0],  # handle extras like package[extra]
+            }
+            return any(candidate in installed_packages for candidate in candidates)
 
         module_to_file = {}
         ignore_dirs = {'venv', '.venv', 'env', '.env', 'node_modules', '.git', '__pycache__', 'site-packages'}
@@ -382,7 +458,7 @@ class DeploymentValidator:
                     incorrect_imports = re.findall(r'from\s+backend\.(\w+)', content)
                     if incorrect_imports:
                         for imp in set(incorrect_imports):
-                            errors.append(f"ImportError in '{module_name}.py': Using 'from backend.{imp}' - MUST use 'from {imp}' instead (relative import). The 'backend.' prefix will fail at runtime in container.")
+                            errors.append(f"ImportError in '{module_name}.py': WRONG - 'from backend.{imp}' | CORRECT - 'from {imp}' (remove 'backend.' prefix - the backend directory IS the Python root, not a package)")
                     
                     # CRITICAL: Check for relative imports (starting with .) in main.py
                     # main.py is the entry point and cannot use relative imports
@@ -398,47 +474,47 @@ class DeploymentValidator:
                     tree = ast.parse(content)
                     for node in ast.walk(tree):
                         imported_modules = []
-                        if isinstance(node, ast.Import): imported_modules = [n.name.split('.')[0] for n in node.names]
-                        elif isinstance(node, ast.ImportFrom) and node.module: imported_modules = [node.module.split('.')[0]]
+                        if isinstance(node, ast.Import):
+                            imported_modules = [n.name for n in node.names]
+                        elif isinstance(node, ast.ImportFrom) and node.module and getattr(node, 'level', 0) == 0:
+                            imported_modules = [node.module]
                         
                         for imp in imported_modules:
-                            if imp in std_lib: continue
+                            top_level_imp = imp.split('.')[0]
+                            if top_level_imp in std_lib:
+                                continue
                             
                             # CRITICAL: Check if this is a local module
                             # First check if it actually exists in the codebase
-                            is_local = imp in module_to_file or any(m.startswith(f"{imp}.") for m in module_to_file)
+                            is_local = top_level_imp in module_to_file or any(m.startswith(f"{top_level_imp}.") for m in module_to_file)
                             
                             # If not found but looks like a common local module name, check subdirectories
-                            if not is_local and imp in ['jwt_utils', 'auth_utils', 'settings', 'config']:
+                            if not is_local and top_level_imp in ['jwt_utils', 'auth_utils', 'settings', 'config']:
                                 # These are commonly local utility modules that might be in subdirectories
                                 # Check if any module path contains this name
-                                is_local = any(imp in m for m in module_to_file)
+                                is_local = any(top_level_imp in m for m in module_to_file)
                             
-                            if is_local: continue
+                            if is_local:
+                                continue
                             
                             # Map import name to package name if known
-                            pkg_name = import_mapping.get(imp, imp)
-                            
-                            # Check multiple naming conventions
-                            is_installed = any(p in installed_packages for p in [
-                                pkg_name.lower(),
-                                pkg_name.replace('_', '-').lower(),
-                                pkg_name.replace('-', '_').lower(),
-                                f"python-{pkg_name.lower()}",
-                                pkg_name.lower().split('[')[0] # handle jose[cryptography]
-                            ])
+                            pkg_name = _map_import_to_package(imp)
+                            is_installed = _is_package_installed(pkg_name)
                             
                             if not is_installed:
-                                errors.append(f"Missing dependency: '{pkg_name}' is required for '{imp}' import in '{module_name}.py'. Add '{pkg_name}' to requirements.txt")
+                                errors.append(f"Missing dependency: '{pkg_name}' is required for '{top_level_imp}' import in '{module_name}.py'. Add '{pkg_name}' to requirements.txt")
 
                         # CRITICAL FIX: Check if imported module file exists
                         if isinstance(node, ast.ImportFrom) and node.module:
                             # Check if this looks like a local import (not stdlib or third-party)
                             top_level_module = node.module.split('.')[0]
+                            mapped_pkg = _map_import_to_package(node.module)
                             is_third_party = (
                                 top_level_module in std_lib or
                                 top_level_module in installed_packages or
-                                top_level_module in import_mapping
+                                node.module in import_mapping or
+                                top_level_module in import_mapping or
+                                _is_package_installed(mapped_pkg)
                             )
                             
                             if not is_third_party:

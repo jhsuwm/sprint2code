@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Optional
 from services.jira_service import JiraService
 from services.gemini_service import GeminiService
 from services.github_service import GitHubService
-from services.google_cloud_service import GoogleCloudService
+from services.local_app_service import LocalAppService
 from agents.job_manager import JobManager, job_store
 from agents.requirements_manager import RequirementsManager
 from agents.code_execution_manager import CodeExecutionManager
@@ -15,12 +15,12 @@ class AutonomousDevAgent:
         self.jira_service = JiraService()
         self.gemini_service = GeminiService()
         self.github_service = GitHubService()
-        self.gcloud_service = GoogleCloudService()
+        self.local_app_service = LocalAppService()
         
         self.job_manager = JobManager(self.jira_service)
         self.requirements_manager = RequirementsManager(self.job_manager, self.jira_service, self.gemini_service, self.github_service)
         self.code_execution_manager = CodeExecutionManager(self.job_manager, self.gemini_service, self.github_service, self.jira_service)
-        self.deployment_manager = DeploymentManager(self.job_manager, self.gcloud_service, self.github_service, self.gemini_service, self.jira_service)
+        self.deployment_manager = DeploymentManager(self.job_manager, self.local_app_service, self.github_service, self.gemini_service, self.jira_service)
 
     async def create_story_from_chat(self, prompt: str, attachments: List[Dict[str, Any]], user_email: str, project_key: str = None, epic_key: str = None) -> Dict[str, Any]:
         logger.info(f"Creating story from chat for user: {user_email}")
@@ -61,6 +61,43 @@ class AutonomousDevAgent:
 
     def get_job_status(self, job_id: str) -> Dict[str, Any]:
         return self.job_manager.get_job(job_id)
+    
+    async def rerun_deployment(self, job_id: str, user_email: str) -> Dict[str, Any]:
+        """
+        Rerun the deployment pipeline after user has manually fixed validation errors.
+        Pulls latest code from GitHub and attempts to start the app locally.
+        """
+        try:
+            # Get the original job data
+            job_data = job_store.get(job_id)
+            if not job_data:
+                return {"success": False, "error": "Job not found"}
+            
+            # Extract necessary info from original job
+            story_key = job_data.get("story_key")
+            epic_key = job_data.get("epic_key")
+            project_key = job_data.get("project_key")
+            
+            # Log the rerun
+            self.job_manager.log(job_id, f"🔄 Rerunning deployment after manual fixes by {user_email}", "Rerun Deployment")
+            
+            # Reset app status to indicate we're retrying
+            job_store[job_id]["app_status"] = "RERUNNING"
+            job_store[job_id]["validation_error_summary"] = None
+            job_store[job_id]["validation_error_details"] = None
+            
+            # Start the deployment process again
+            await self.deployment_manager.start_app_locally(job_id, epic_key, story_key, project_key)
+            
+            return {
+                "success": True,
+                "job_id": job_id,
+                "message": "Deployment rerun started"
+            }
+            
+        except Exception as e:
+            logger.error(f"Error rerunning deployment for job {job_id}: {e}")
+            return {"success": False, "error": str(e)}
 
     async def _run_pipeline(self, job_id: str, story_id: str):
         try:
@@ -81,13 +118,29 @@ class AutonomousDevAgent:
             # 3. Pull Request
             await self.code_execution_manager.create_pull_request(job_id, story_key, plan_data["fields"].get('summary'))
 
-            # 4. Deployment & Verification (Cloud Run logs)
-            await self.deployment_manager.deploy_to_cloud_run(job_id, epic_key, story_key)
+            # 4. Start App Locally (Static Analysis → Auto-Fix → Local Startup)
+            await self.deployment_manager.start_app_locally(job_id, epic_key, story_key)
             
-            # Finalize
-            self.job_manager.set_job_completion(job_id, True)
-            self._post_final_logs(job_id, story_id, story_key)
-            self.jira_service.update_issue_status(story_id, "DONE")
+            # Check if deployment succeeded before marking as complete
+            final_app_status = job_store.get(job_id, {}).get("app_status")
+            
+            if final_app_status in ["VALIDATION_FAILED", "STARTUP_FAILED", "FAILED"]:
+                # Deployment failed - mark job as FAILED
+                self.job_manager.set_job_completion(job_id, False)
+                self._post_final_logs(job_id, story_id, story_key)
+                # Don't update JIRA to DONE if deployment failed
+                
+                # Log final status with helpful message
+                if final_app_status == "VALIDATION_FAILED":
+                    error_count = len(job_store.get(job_id, {}).get("validation_errors_list", []))
+                    self.job_manager.log(job_id, f"❌ Pipeline failed with status: {final_app_status} - Review detailed file errors listed above and fix them in your GitHub repository", "Pipeline Failed", level="ERROR")
+                else:
+                    self.job_manager.log(job_id, f"❌ Pipeline failed with status: {final_app_status}", "Pipeline Failed", level="ERROR")
+            else:
+                # Deployment succeeded - mark as complete
+                self.job_manager.set_job_completion(job_id, True)
+                self._post_final_logs(job_id, story_id, story_key)
+                self.jira_service.update_issue_status(story_id, "DONE")
 
         except Exception as e:
             self.job_manager.log(job_id, f"Pipeline failed: {e}", "Error", level="ERROR")

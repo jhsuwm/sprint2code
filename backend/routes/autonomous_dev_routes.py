@@ -387,6 +387,46 @@ async def generate_prd(
         logger.error(f"Error generating PRD: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/rerun-deployment/{job_id}")
+async def rerun_deployment(
+    job_id: str,
+    authorization: str = Header(...)
+):
+    """
+    Rerun the deployment pipeline after user has manually fixed validation errors.
+    This is triggered by the "Rerun Deployment" button in the UI when validation fails.
+    """
+    try:
+        user_payload = await get_user_from_header(authorization)
+        email = user_payload.get("email")
+        
+        # Get the job status to check if it's in a rerunnable state
+        job_status = agent.get_job_status(job_id)
+        if job_status.get("status") == "NOT_FOUND":
+            raise HTTPException(status_code=404, detail="Job not found")
+        
+        app_status = job_status.get("app_status")
+        
+        # Only allow rerun for validation failures
+        if app_status not in ["VALIDATION_FAILED", "STARTUP_FAILED"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot rerun deployment. Current status: {app_status}. Only VALIDATION_FAILED or STARTUP_FAILED jobs can be rerun."
+            )
+        
+        logger.info(f"Rerunning deployment for job {job_id} by user {email}")
+        
+        # Call the agent to rerun the deployment
+        result = await agent.rerun_deployment(job_id, email)
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error rerunning deployment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/fix-startup-failure/{job_id}")
 async def fix_startup_failure(
     job_id: str,

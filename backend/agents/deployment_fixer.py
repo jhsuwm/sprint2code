@@ -14,11 +14,10 @@ from agents.job_manager import job_store
 class DeploymentFixer:
     """Optimized auto-fixer with batching"""
     
-    def __init__(self, job_manager, gemini_service, github_service, gcloud_service, jira_service):
+    def __init__(self, job_manager, gemini_service, github_service, jira_service):
         self.job_manager = job_manager
         self.gemini_service = gemini_service
         self.github_service = github_service
-        self.gcloud_service = gcloud_service
         self.jira_service = jira_service
         
         # Import validator for per-file validation
@@ -32,6 +31,110 @@ class DeploymentFixer:
         self._file_error_hashes = {}  # Track error signatures per file to detect no progress
         self._unfixable_files = {}  # Files that made things worse or showed no progress
         self._resurrection_count = {}  # Track how many times each file has been resurrected
+        self._invalid_npm_packages = set()  # Track invalid npm packages reported by ETARGET
+    
+    def _safe_log(self, job_id: str, message: str, category: str = "Fix", level: str = "INFO"):
+        """
+        Safe logging that works even when called from parallel workers.
+        Falls back to logger.info if job doesn't exist in job_manager.
+        """
+        try:
+            # Try to log through job_manager first
+            self.job_manager.log(job_id, message, category, level=level)
+        except (KeyError, AttributeError):
+            # Fall back to direct logging if job not in manager (e.g., from worker)
+            logger.info(f"[Job {job_id}] [{category}] {message}")
+
+    def _normalize_repo_relative_path(self, path: str) -> str:
+        """Normalize optional frontend/backend prefixes for robust file-path comparisons."""
+        p = (path or "").strip().replace("\\", "/")
+        if p.startswith("./"):
+            p = p[2:]
+        if p.startswith("frontend/"):
+            p = p[9:]
+        elif p.startswith("backend/"):
+            p = p[8:]
+        return p
+
+    def _paths_match(self, candidate_path: str, target_path: str) -> bool:
+        """Check whether candidate and target refer to the same repo-relative file."""
+        c = self._normalize_repo_relative_path(candidate_path)
+        t = self._normalize_repo_relative_path(target_path)
+        return c == t or c.endswith(f"/{t}") or t.endswith(f"/{c}")
+
+    def _canonical_path_key(self, path: str) -> str:
+        """Create comparable module/file key across alias, extension, and prefix variants."""
+        p = (path or "").strip().replace("\\", "/").strip("'\"")
+        if p.startswith("./"):
+            p = p[2:]
+        if p.startswith("@/"):
+            p = p[2:]
+        if p.startswith("frontend/"):
+            p = p[9:]
+        elif p.startswith("backend/"):
+            p = p[8:]
+        p = re.sub(r"\.(tsx?|jsx?|py)$", "", p)
+        p = re.sub(r"/index$", "", p)
+        return p
+
+    def _error_mentions_file(self, error: str, target_file: str) -> bool:
+        """Check whether an error string points to the target file using normalized path matching."""
+        if not error or not target_file:
+            return False
+
+        target_norm = self._normalize_repo_relative_path(target_file)
+        target_key = self._canonical_path_key(target_file)
+        quoted_paths = re.findall(r"'([^']+)'", error)
+        candidate_paths = list(quoted_paths)
+
+        # Also capture leading absolute/relative path before "(line,col): error TS..."
+        if "error TS" in error and "(" in error:
+            left = error.split("(", 1)[0].strip()
+            if left:
+                candidate_paths.append(left)
+
+        for candidate in candidate_paths:
+            cand_norm = self._normalize_repo_relative_path(candidate)
+            cand_key = self._canonical_path_key(candidate)
+            if not cand_norm:
+                continue
+            if cand_norm == target_norm or cand_norm.endswith(f"/{target_norm}") or target_norm.endswith(f"/{cand_norm}"):
+                return True
+            if cand_key and target_key and (cand_key == target_key or cand_key.endswith(f"/{target_key}") or target_key.endswith(f"/{cand_key}")):
+                return True
+
+        # Fallback substring checks for legacy/non-standard error formatting
+        return (
+            target_file in error
+            or target_norm in error.replace("\\", "/")
+            or target_key in error.replace("\\", "/")
+            or f"/{target_norm}" in error.replace("\\", "/")
+        )
+
+    def _target_repo_prefix(self, target_file: str) -> str:
+        """Infer repo prefix for a target path."""
+        p = (target_file or "").replace("\\", "/")
+        if p.startswith("frontend/"):
+            return "frontend"
+        if p.startswith("backend/"):
+            return "backend"
+        if p.endswith(".py"):
+            return "backend"
+        return "frontend"
+
+    def _coerce_generated_path(self, generated_path: str, target_file: str) -> str:
+        """Coerce generated file path to full workspace-relative path with repo prefix."""
+        gp = (generated_path or "").strip().replace("\\", "/")
+        gp = gp[2:] if gp.startswith("./") else gp
+        if gp.startswith(("frontend/", "backend/")):
+            return gp
+        prefix = self._target_repo_prefix(target_file)
+        return f"{prefix}/{gp}"
+
+    def _is_cross_repo_generated_file(self, generated_full_path: str, target_file: str) -> bool:
+        """Reject generated files that cross repo boundaries for a single-file task."""
+        target_prefix = self._target_repo_prefix(target_file)
+        return not generated_full_path.startswith(f"{target_prefix}/")
     
     def update_error_history(self, job_id: str, all_errors: List[str], repo_dir: str):
         """Update error history for files modified in the last cycle"""
@@ -54,7 +157,7 @@ class DeploymentFixer:
                 errors = current_files_to_fix[file_path].get('missing', [])
                 if not errors:
                     # Might be a TypeScript error not parsed correctly into 'missing'
-                    errors = [e for e in all_errors if file_path in e or (file_path.replace('frontend/', '') in e)]
+                    errors = [e for e in all_errors if self._error_mentions_file(e, file_path)]
                 
                 self._fix_error_history[job_id][file_path].append(errors or ["Unknown errors remaining"])
             else:
@@ -291,7 +394,7 @@ class DeploymentFixer:
                         file_errors = self.validator.validate_all(repo_dir)
                         
                         # Check if THIS specific file still has errors
-                        file_specific_errors = [e for e in file_errors if file_path in e or file_path.replace('backend/', '') in e or file_path.replace('frontend/', '') in e]
+                        file_specific_errors = [e for e in file_errors if self._error_mentions_file(e, file_path)]
                         
                         if not file_specific_errors:
                             # ✅ Validation passed - NOW commit
@@ -474,7 +577,8 @@ class DeploymentFixer:
         max_retries = 2
         for retry in range(max_retries):
             try:
-                timeout = 45.0  # Slightly longer for batches
+                # OPTIMIZATION D: Reduced timeout for faster failure
+                timeout = 30.0  # Reduced from 45s for faster failure
                 
                 result = await self.gemini_service.generate_code(
                     task_description=f"Fix {len(batch)} files",
@@ -581,6 +685,9 @@ class DeploymentFixer:
             context = ""
             job_data = job_store.get(job_id, {})
             
+            # Get technical_config dict which contains frontend/backend configs
+            technical_config = job_data.get("technical_config", {})
+            
             # Determine if this is a frontend or backend file
             is_frontend = False
             is_backend = False
@@ -599,14 +706,14 @@ class DeploymentFixer:
             
             # Load ONLY relevant config to reduce context size
             if is_frontend:
-                frontend_config = job_data.get("frontend_config_content")
+                frontend_config = technical_config.get("frontend", "")
                 if frontend_config:
                     context += "=== FRONTEND TECHNICAL REQUIREMENTS ===\n"
                     context += frontend_config[:4000]  # Increased from 3000 since we're only including one
                     context += "\n\n"
             
             if is_backend:
-                backend_config = job_data.get("backend_config_content")
+                backend_config = technical_config.get("backend", "")
                 if backend_config:
                     context += "=== BACKEND TECHNICAL REQUIREMENTS ===\n"
                     context += backend_config[:4000]  # Increased from 3000 since we're only including one
@@ -719,11 +826,11 @@ class DeploymentFixer:
         prompt += "Repeat the FILE_PATH block for each file.\n"
         return prompt
     
-    async def _generate_file_fix(self, job_id: str, target_file: str, info: dict, github_repo: str, github_branch: str, repo_dir: str, yaml_context: str = "", story_context: str = "") -> Optional[str]:
-        """Generate fixed content for a file without committing - returns content or None"""
+    async def _generate_file_fix_bundle(self, job_id: str, target_file: str, info: dict, github_repo: str, github_branch: str, repo_dir: str, yaml_context: str = "", story_context: str = "") -> Optional[Dict[str, Any]]:
+        """Generate fix bundle with target content and companion files from same repo."""
         job_fix_history = self._fix_attempt_history.get(job_id, {})
-        code_history = self._fix_code_history[job_id].get(target_file, [])
-        error_history = self._fix_error_history[job_id].get(target_file, [])
+        code_history = self._fix_code_history.get(job_id, {}).get(target_file, [])
+        error_history = self._fix_error_history.get(job_id, {}).get(target_file, [])
         
         prompt = self._build_fix_prompt(target_file, info, yaml_context, story_context, job_fix_history, code_history, error_history, repo_dir)
         
@@ -750,15 +857,63 @@ class DeploymentFixer:
                 return None
             
             parsed = self.gemini_service.parse_generated_code(code)
-            if not parsed or not parsed[0]:
+            if not parsed:
                 return None
-            
-            # Return the content
-            return parsed[0]['content']
+
+            target_content = None
+            related_files: List[Dict[str, str]] = []
+
+            for parsed_file in parsed:
+                raw_path = parsed_file.get('file_path', '')
+                content = parsed_file.get('content')
+                if not raw_path or content is None:
+                    continue
+                full_path = self._coerce_generated_path(raw_path, target_file)
+
+                # Never apply cross-repo files in this context.
+                if self._is_cross_repo_generated_file(full_path, target_file):
+                    continue
+
+                if self._paths_match(full_path, target_file):
+                    target_content = content
+                    continue
+
+                # Avoid dependency churn from incidental package/lock edits here.
+                if full_path.endswith(("package.json", "package-lock.json", "requirements.txt")):
+                    continue
+
+                related_files.append({'file_path': full_path, 'content': content})
+
+            if target_content is None:
+                if len(parsed) == 1:
+                    target_content = parsed[0].get('content')
+                else:
+                    self._safe_log(job_id, f"⚠️ AI output missing target file block for {target_file}", "Parse Mismatch", level="WARNING")
+                    return None
+
+            deduped_related = []
+            seen = set()
+            for entry in related_files:
+                fp = entry['file_path']
+                if fp in seen or self._paths_match(fp, target_file):
+                    continue
+                seen.add(fp)
+                deduped_related.append(entry)
+
+            return {'target_content': target_content, 'related_files': deduped_related}
             
         except Exception as e:
             logger.error(f"Generate fix failed for {target_file}: {e}")
             return None
+
+    async def _generate_file_fix(self, job_id: str, target_file: str, info: dict, github_repo: str, github_branch: str, repo_dir: str, yaml_context: str = "", story_context: str = "") -> Optional[str]:
+        """Generate fixed content for a file without committing - returns content or None."""
+        bundle = await self._generate_file_fix_bundle(
+            job_id, target_file, info, github_repo, github_branch, repo_dir, yaml_context, story_context
+        )
+        if not bundle:
+            return None
+        return bundle.get('target_content')
     
     async def _commit_file_fix(self, job_id: str, file_path: str, content: str, github_repo: str, github_branch: str) -> bool:
         """Commit a fixed file to GitHub"""
@@ -790,6 +945,17 @@ class DeploymentFixer:
             
         except Exception as e:
             logger.error(f"Commit failed for {file_path}: {e}")
+            return False
+
+    async def _commit_programmatic_fix(self, job_id: str, file_path: str, content: str, github_repo: str, github_branch: str, message_prefix: str = "[PROG]") -> bool:
+        """Commit helper for programmatic fixes with correct multi-repo routing."""
+        try:
+            success = await self._commit_file_fix(job_id, file_path, content, github_repo, github_branch)
+            if not success:
+                self._safe_log(job_id, f"❌ Failed to commit programmatic fix for {file_path}", "Programmatic Commit", level="WARNING")
+            return success
+        except Exception as e:
+            logger.error(f"Programmatic commit failed for {file_path}: {e}")
             return False
     
     async def _fix_single_file(self, job_id: str, target_file: str, info: dict, github_repo: str, github_branch: str, repo_dir: str, yaml_context: str = "", story_context: str = "") -> bool:
@@ -845,50 +1011,31 @@ class DeploymentFixer:
                         return False
                 
                 if parsed:
-                    job_data = job_store.get(job_id, {})
-                    all_repos = job_data.get("all_repos", [])
-                    
-                    for f in parsed:
-                        path, content = f['file_path'], f['content']
-                        
-                        # Route to correct repo
-                        target_repo = github_repo
-                        if path.endswith('.py') or 'backend/' in path.lower():
-                            backend_repo = next((r for r in all_repos if r.get('type') == 'backend'), None)
-                            if backend_repo:
-                                target_repo = f"{backend_repo['owner']}/{backend_repo['repo']}"
-                        elif path.endswith(('.tsx', '.ts', '.jsx', '.js')) or 'frontend/' in path.lower():
-                            frontend_repo = next((r for r in all_repos if r.get('type') == 'frontend'), None)
-                            if frontend_repo:
-                                target_repo = f"{frontend_repo['owner']}/{frontend_repo['repo']}"
-                        
-                        # FIXED: Normalize path - remove ONLY top-level repo directory prefix
-                        final_path = path
-                        owner, repo_name = target_repo.split('/')
-                        repo_type = next((r.get('type') for r in all_repos if f"{r['owner']}/{r['repo']}" == target_repo), 'unknown')
-                        
-                        # Remove ONLY the top-level directory prefix (backend/ or frontend/)
-                        if final_path.startswith('backend/'):
-                            final_path = final_path[8:]
-                        elif final_path.startswith('frontend/'):
-                            final_path = final_path[9:]
-                        
-                        if self.github_service.commit_file(owner, repo_name, github_branch, final_path, content, f"[FIX] {final_path}"):
-                            self.job_manager.log(job_id, f"Successfully committed fix for {final_path} to {target_repo}", "Fix Applied")
-                            
-                            # Sync locally
-                            full_path = os.path.join(repo_dir, path)
-                            os.makedirs(os.path.dirname(full_path), exist_ok=True)
-                            with open(full_path, 'w') as file:
-                                file.write(content)
-                            
-                            # Record attempt in history
-                            if target_file not in self._fix_code_history[job_id]: self._fix_code_history[job_id][target_file] = []
-                            self._fix_code_history[job_id][target_file].append(content)
-                            self._last_cycle_files[job_id].append(target_file)
-                            
-                            return True
-                    return True
+                    target_entry = next((f for f in parsed if self._paths_match(f.get('file_path', ''), target_file)), None)
+                    if target_entry is None:
+                        if len(parsed) == 1:
+                            target_entry = parsed[0]
+                        else:
+                            self.job_manager.log(job_id, f"❌ {target_file}: AI response missing target file block", "Parse Failed", level="WARNING")
+                            continue
+
+                    content = target_entry['content']
+                    if await self._commit_file_fix(job_id, target_file, content, github_repo, github_branch):
+                        self.job_manager.log(job_id, f"Successfully committed fix for {target_file}", "Fix Applied")
+
+                        # Sync locally to the intended target file.
+                        full_path = os.path.join(repo_dir, target_file)
+                        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+                        with open(full_path, 'w') as file:
+                            file.write(content)
+
+                        # Record attempt in history
+                        if target_file not in self._fix_code_history[job_id]:
+                            self._fix_code_history[job_id][target_file] = []
+                        self._fix_code_history[job_id][target_file].append(content)
+                        self._last_cycle_files[job_id].append(target_file)
+                        return True
+                    continue
             except asyncio.TimeoutError:
                 self.job_manager.log(job_id, f"⏱️ {target_file}: Timeout on retry {retry+1}/{max_retries} ({timeout}s)", "Timeout", level="WARNING")
                 if retry < max_retries - 1:
@@ -1155,6 +1302,17 @@ class DeploymentFixer:
         prompt += "- Creating a partial implementation with TODOs (still fails)\n"
         prompt += "- Importing something that doesn't exist in the source file (still fails)\n"
         prompt += "- Changing error type without fixing the underlying issue (still fails)\n\n"
+
+        if file_path.endswith("requirements.txt"):
+            prompt += "### REQUIREMENTS.TXT RULES ###\n"
+            prompt += "- NEVER remove existing dependencies unless an error explicitly says the package is invalid.\n"
+            prompt += "- ONLY add missing packages required by the listed errors.\n"
+            prompt += "- Keep currently working dependencies intact.\n\n"
+        elif file_path.endswith("package.json"):
+            prompt += "### PACKAGE.JSON RULES ###\n"
+            prompt += "- NEVER remove existing dependencies unless an error explicitly says package/version is invalid.\n"
+            prompt += "- ONLY add missing packages required by the listed errors.\n"
+            prompt += "- Keep currently working dependencies intact.\n\n"
         
         prompt += "### ✅ SUCCESS = ZERO ERRORS ###\n"
         prompt += "After your fix, ALL these must be true:\n"
@@ -1176,11 +1334,53 @@ class DeploymentFixer:
         files = {}
         
         for error in errors:
+            # Missing mandatory frontend configuration file (e.g., next.config.js, tsconfig.json)
+            # These errors come from _validate_frontend_dependencies and look like:
+            # "Missing mandatory file: 'next.config.js' (Next.js configuration) is required"
+            mandatory_match = re.search(r"Missing mandatory file: '([^']+)' \(([^)]+)\) is required", error)
+            if mandatory_match:
+                filename = mandatory_match.group(1)
+                description = mandatory_match.group(2)
+                # These files live at the root of the frontend directory
+                file_path = f"frontend/{filename}"
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = ''
+                    if os.path.exists(local):
+                        with open(local, 'r') as f:
+                            content = f.read()
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(
+                    f"File does not exist - CREATE IT: {filename} ({description})"
+                )
+                continue
+
+            # Invalid pip requirement line (e.g. "---" separator from AI code-block format)
+            # Detected by deployment_validator._validate_python_imports
+            invalid_pip_match = re.search(
+                r"Invalid pip requirement in 'requirements\.txt': '([^']+)'", error
+            )
+            if invalid_pip_match:
+                file_path = "backend/requirements.txt"
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = ''
+                    if os.path.exists(local):
+                        with open(local, 'r') as f:
+                            content = f.read()
+                    files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                files[file_path]['missing'].append(
+                    f"Strip invalid pip line: '{invalid_pip_match.group(1)}'"
+                )
+                continue
+
             # Missing dependency
             if "Missing dependency:" in error:
                 pkg_match = re.search(r"Missing dependency: '([^']+)'", error)
                 if pkg_match:
                     pkg = pkg_match.group(1)
+                    if pkg == "google":
+                        pkg = "google-cloud-firestore"
                     file_path = "backend/requirements.txt" if "requirements.txt" in error else "frontend/package.json"
                     
                     if file_path not in files:
@@ -1228,28 +1428,21 @@ class DeploymentFixer:
                 module_trying_to_import = cannot_import_match.group(2)
                 missing_file = cannot_import_match.group(3)
                 
-                # CRITICAL: Distinguish between pip packages and local files
-                # If module name has no dots/slashes and matches common package patterns, it's a package
+                # CRITICAL: Distinguish between pip packages and local files.
+                # Dotted module paths like "google.cloud.firestore" are still package imports.
+                top_module = module_trying_to_import.split('.')[0]
+                third_party_roots = {
+                    'pydantic', 'jose', 'bcrypt', 'jwt', 'fastapi', 'uvicorn',
+                    'google', 'firebase', 'sqlalchemy', 'alembic', 'redis',
+                    'celery', 'requests', 'httpx', 'aiohttp', 'boto3', 'stripe',
+                    'flask', 'django', 'numpy', 'pandas', 'scipy', 'sklearn',
+                    'tensorflow', 'torch', 'keras', 'passlib', 'pytest',
+                    'click', 'jinja2', 'email_validator'
+                }
                 is_package = (
                     '/' not in module_trying_to_import and
-                    '.' not in module_trying_to_import and
                     not module_trying_to_import.startswith(('.', '@')) and
-                    (
-                        # Common package name patterns (prefix match)
-                        any(module_trying_to_import.startswith(prefix) for prefix in [
-                            'pydantic', 'jose', 'bcrypt', 'jwt', 'fastapi', 'uvicorn',
-                            'google', 'firebase', 'sqlalchemy', 'alembic', 'redis',
-                            'celery', 'requests', 'httpx', 'aiohttp', 'boto3', 'stripe',
-                            'flask', 'django', 'numpy', 'pandas', 'scipy', 'sklearn',
-                            'tensorflow', 'torch', 'keras'
-                        ]) or
-                        # Exact package names (common packages with short names)
-                        module_trying_to_import in [
-                            'jose', 'bcrypt', 'passlib', 'email_validator', 
-                            'flask', 'django', 'redis', 'celery', 'pytest',
-                            'numpy', 'pandas', 'scipy', 'click', 'jinja2'
-                        ]
-                    )
+                    top_module in third_party_roots
                 )
                 
                 if is_package:
@@ -1268,8 +1461,19 @@ class DeploymentFixer:
                         'jose': 'python-jose[cryptography]',
                         'jwt_utils': 'PyJWT',
                         'email_validator': 'email-validator',
-                        'passlib': 'passlib[bcrypt]'
+                        'passlib': 'passlib[bcrypt]',
+                        'google.cloud.firestore': 'google-cloud-firestore',
+                        'google.cloud.storage': 'google-cloud-storage',
+                        'google.cloud.secretmanager': 'google-cloud-secret-manager',
+                        'google.api_core': 'google-api-core',
+                        'firebase_admin': 'firebase-admin',
                     }.get(module_trying_to_import, module_trying_to_import)
+                    if pkg_name == module_trying_to_import:
+                        pkg_name = {
+                            'google': 'google-cloud-firestore',
+                            'firebase': 'firebase-admin',
+                            'pydantic': 'pydantic',
+                        }.get(top_module, module_trying_to_import)
                     files[file_path]['packages'].add(pkg_name)
                     continue
                 
@@ -1288,8 +1492,8 @@ class DeploymentFixer:
                 continue
             
             # NEW: Handle both variations of wrong import format errors
-            # Pattern 1: "Using 'from backend.X' - MUST use 'from X' instead"
-            # Pattern 2: "Cannot import from 'backend.X' - file 'backend/X.py' does not exist" (when file exists but import is wrong)
+            # Pattern 1: New format: "WRONG - 'from backend.X' | CORRECT - 'from X'"
+            # Pattern 2: Legacy format: "Using 'from backend.X' - MUST use 'from X' instead"
             wrong_import_match = re.search(r"ImportError in '([^']+)': (?:Using 'from backend\.([^']+)'|Cannot import from 'backend\.([^']+)')", error)
             if wrong_import_match:
                 file_with_error = wrong_import_match.group(1)
@@ -1318,9 +1522,9 @@ class DeploymentFixer:
             # Legacy pattern kept for backwards compatibility
             wrong_import_legacy = re.search(r"ImportError in '([^']+)': Using 'from backend\.([^']+)' - MUST use 'from ([^']+)' instead", error)
             if wrong_import_legacy:
-                file_with_error = wrong_import_match.group(1)
-                wrong_import = wrong_import_match.group(2)
-                correct_import = wrong_import_match.group(3)
+                file_with_error = wrong_import_legacy.group(1)
+                wrong_import = wrong_import_legacy.group(2)
+                correct_import = wrong_import_legacy.group(3)
                 
                 # The file that has the wrong import
                 file_path = f"backend/{file_with_error.replace('.', '/')}.py"
@@ -1339,11 +1543,48 @@ class DeploymentFixer:
             # TypeScript error - check if it's a missing module (package)
             tsc_match = re.search(r"TypeScript error in '([^']+)' at", error)
             if tsc_match:
+                importer_rel = tsc_match.group(1)
+                importer_path = f"frontend/{importer_rel}" if not importer_rel.startswith('frontend/') else importer_rel
+                importer_path = self._normalize_file_path(importer_path)
+
+                # Check if it's a "missing exported member" error and route to dependency file.
+                export_match = re.search(r"2305:\s*Module '\"?([^']+)\"?' has no exported member '([^']+)'", error)
+                if export_match:
+                    target_module = export_match.group(1).strip().strip('"')
+                    missing_export = export_match.group(2).strip()
+                    dep_path = self._resolve_import_path(importer_path, target_module, repo_dir)
+                    dep_path = self._normalize_file_path(dep_path)
+                    if dep_path not in files:
+                        local = os.path.join(repo_dir, dep_path)
+                        content = ''
+                        if os.path.exists(local):
+                            with open(local, 'r') as f:
+                                content = f.read()
+                        files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
+                    files[dep_path]['missing'].append(f"Missing export: {missing_export}")
+                    files[dep_path]['dependent_files'].append(importer_path)
+
                 # Check if it's a "Cannot find module" error indicating missing package
-                module_match = re.search(r"2307: Cannot find module '([^']+)'", error)
+                module_match = re.search(r"(?:2307:\s*)?Cannot find module '([^']+)'", error)
                 if module_match:
                     missing_module = module_match.group(1)
-                    # Extract package name (first part before /)
+                    # Local alias/path imports are not npm packages; treat them as missing local modules.
+                    if missing_module.startswith(('@/','./','../','~/', '/')):
+                        dep_path = self._resolve_import_path(importer_path, missing_module, repo_dir)
+                        dep_path = self._normalize_file_path(dep_path)
+                        if dep_path not in files:
+                            local = os.path.join(repo_dir, dep_path)
+                            content = ''
+                            if os.path.exists(local):
+                                with open(local, 'r') as f:
+                                    content = f.read()
+                            files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
+                        files[dep_path]['missing'].append(f"Missing local module for import: {missing_module}")
+                        files[dep_path]['dependent_files'].append(importer_path)
+                        continue
+
+                    # Extract package name.
+                    pkg = missing_module
                     if '/' in missing_module:
                         pkg = missing_module.split('/')[0]
                         # If it starts with @, include the scope
@@ -1351,21 +1592,21 @@ class DeploymentFixer:
                             parts = missing_module.split('/')
                             if len(parts) >= 2:
                                 pkg = f"{parts[0]}/{parts[1]}"
-                        
-                        # This is a missing package - add to package.json
-                        file_path = "frontend/package.json"
-                        if file_path not in files:
-                            local = os.path.join(repo_dir, file_path)
-                            content = ''
-                            if os.path.exists(local):
-                                with open(local, 'r') as f:
-                                    content = f.read()
-                            files[file_path] = {'missing': [], 'content': content, 'packages': set()}
-                        files[file_path]['packages'].add(pkg)
-                        continue
+
+                    # This is a missing package - add to package.json
+                    file_path = "frontend/package.json"
+                    if file_path not in files:
+                        local = os.path.join(repo_dir, file_path)
+                        content = ''
+                        if os.path.exists(local):
+                            with open(local, 'r') as f:
+                                content = f.read()
+                        files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                    files[file_path]['packages'].add(pkg)
+                    continue
                 
                 # Regular TypeScript error
-                file_rel = tsc_match.group(1)
+                file_rel = importer_rel
                 file_path = f"frontend/{file_rel}" if not file_rel.startswith('frontend/') else file_rel
                 file_path = self._normalize_file_path(file_path)
                 
@@ -1382,11 +1623,14 @@ class DeploymentFixer:
     
     def _normalize_file_path(self, path: str) -> str:
         """Normalize file path to prevent duplication (e.g., frontend/src/src/api -> frontend/src/api)"""
-        # Remove duplicate path segments
+        # Remove duplicate path segments and current directory markers
         parts = path.split('/')
         normalized = []
         
         for part in parts:
+            # Skip empty strings (from double slashes) and current directory markers
+            if not part or part == '.':
+                continue
             # Don't add duplicate consecutive parts
             if not normalized or part != normalized[-1]:
                 normalized.append(part)
@@ -1434,7 +1678,23 @@ class DeploymentFixer:
         return dependency_files
     
     def _resolve_import_path(self, importer: str, target: str, repo_dir: str) -> str:
-        """Resolve import to file path with robust prefix handling"""
+        """Resolve import to file path with robust prefix handling."""
+        def _pick_existing_frontend_file(base_no_ext: str) -> str:
+            candidates = [
+                f"{base_no_ext}.ts",
+                f"{base_no_ext}.tsx",
+                f"{base_no_ext}.js",
+                f"{base_no_ext}.jsx",
+                f"{base_no_ext}/index.ts",
+                f"{base_no_ext}/index.tsx",
+                f"{base_no_ext}/index.js",
+                f"{base_no_ext}/index.jsx",
+            ]
+            for candidate in candidates:
+                if os.path.exists(os.path.join(repo_dir, candidate)):
+                    return candidate
+            return f"{base_no_ext}.ts"
+
         if importer.endswith('.py'):
             # Strip common prefixes from target if they exist
             clean_target = target
@@ -1448,16 +1708,33 @@ class DeploymentFixer:
                 
             return f"backend/{clean_target.replace('.', '/')}.py"
         else:
-            if target.startswith('../types/'):
-                return f"frontend/src/types/{target.split('/')[-1]}.ts"
-            elif target.startswith('../'):
-                return f"frontend/{target.replace('../', 'src/')}.ts"
-            else:
-                # Handle @/ prefix common in Next.js
-                clean_target = target
-                if clean_target.startswith('@/'):
-                    clean_target = clean_target[2:]
-                return f"frontend/src/{clean_target}.ts"
+            importer_norm = importer.replace("\\", "/")
+            if not importer_norm.startswith("frontend/"):
+                if importer_norm.startswith("src/") or importer_norm.startswith("app/"):
+                    importer_norm = f"frontend/{importer_norm}"
+                else:
+                    importer_norm = f"frontend/src/{importer_norm.lstrip('./')}"
+
+            target_norm = target.replace("\\", "/")
+
+            # Resolve relative imports against importer directory (critical for ./ and ../ paths).
+            if target_norm.startswith(("./", "../")):
+                importer_dir = os.path.dirname(importer_norm)
+                base = os.path.normpath(os.path.join(importer_dir, target_norm)).replace("\\", "/")
+                return _pick_existing_frontend_file(base)
+
+            # Handle @/ alias (Next.js)
+            if target_norm.startswith("@/"):
+                alias_base = f"frontend/src/{target_norm[2:]}"
+                return _pick_existing_frontend_file(alias_base)
+
+            # Handle direct src/* imports
+            if target_norm.startswith("src/"):
+                src_base = f"frontend/{target_norm}"
+                return _pick_existing_frontend_file(src_base)
+
+            # Fallback to frontend/src/<target>
+            return _pick_existing_frontend_file(f"frontend/src/{target_norm}")
     
     def _is_test_file(self, file_path: str) -> bool:
         """Check if file is a test file"""
@@ -1481,14 +1758,29 @@ class DeploymentFixer:
     
     def _should_try_programmatic(self, file_path: str, file_info: dict) -> bool:
         """Should we try programmatic fix?"""
+        missing_items = [str(err) for err in file_info.get('missing', [])]
         if file_path.endswith(('requirements.txt', 'package.json')):
+            return True
+        # Missing mandatory frontend config files - always create programmatically
+        if file_path in ('frontend/next.config.js', 'frontend/tsconfig.json'):
             return True
         if file_path.endswith('.py') and '/models/' in file_path:
             return True
+        if file_path.endswith('.py') and any('File does not exist - CREATE IT' in err for err in missing_items):
+            return True
         if self._is_test_file(file_path):
             return True  # Always try programmatic for test files
+        # Deterministic syntax cleanup for common JSX inline-comment breakage (TS1005).
+        if file_path.endswith(('.tsx', '.jsx')) and any(("1005" in err) or ("'...' expected" in err) for err in missing_items):
+            return True
         if '/types/' in file_path and file_path.endswith('.ts'):
+            # For missing exports in shared type files, deterministic export stubs are safer than repeated AI loops.
+            if any('Missing export:' in err or 'not found in' in err for err in missing_items):
+                return True
             return len(file_info.get('content', '')) < 500
+        # NEW: Try programmatic fix for files with "from backend.X" errors
+        if file_path.endswith('.py') and any('backend.' in err for err in missing_items):
+            return True
         return False
     
     async def _apply_programmatic_fix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
@@ -1498,37 +1790,140 @@ class DeploymentFixer:
                 return await self._fix_requirements(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('package.json'):
                 return await self._fix_package_json(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Missing mandatory frontend configuration files - create with known-good boilerplate
+            elif file_path == 'frontend/next.config.js':
+                return await self._create_next_config(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path == 'frontend/tsconfig.json':
+                return await self._create_tsconfig(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('.py') and '/models/' in file_path:
                 return await self._fix_backend_model(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith('.py') and any('File does not exist - CREATE IT' in str(err) for err in file_info.get('missing', [])):
+                return await self._create_missing_backend_module(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.test.tsx', '.test.ts')):
                 return await self._fix_test_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.tsx', '.jsx')) and any(("1005" in str(err)) or ("'...' expected" in str(err)) for err in file_info.get('missing', [])):
+                return await self._fix_jsx_inline_comment_syntax(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif '/types/' in file_path and file_path.endswith('.ts'):
                 return await self._fix_type_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # NEW: Programmatic fix for "from backend.X" errors
+            elif file_path.endswith('.py') and any('backend.' in str(err) for err in file_info.get('missing', [])):
+                return await self._fix_backend_prefix(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             return False
         except Exception as e:
             logger.error(f"Programmatic fix error: {e}")
             return False
     
     async def _fix_requirements(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
-        """Add missing packages"""
+        """Add missing packages and strip any pip-incompatible separator lines."""
         packages = file_info.get('packages', set())
-        if not packages:
-            return False
-        
+
         local = os.path.join(repo_dir, file_path)
         original_content = file_info.get('content', '')
         content = original_content
+
+        # CRITICAL: Strip malformed lines that break pip install.
+        # AI-generated requirements.txt files sometimes include:
+        #   - code-block markers:  ---, ===, ```
+        #   - code-gen markers:    FILE_PATH: ...
+        #   - Python code lines:   from X import Y, import X, class X, def X, ...
+        # These all cause: ERROR: Invalid requirement: '...'
+        def _is_invalid_req_line(s: str) -> bool:
+            """Return True for any line that is not a valid pip requirement spec."""
+            if not s or s.startswith('#'):
+                return False
+            # Explicit code-block / code-gen format markers
+            if s.startswith('```') or s.startswith('FILE_PATH:'):
+                return True
+            # Pure separator lines: ---, ===, etc.
+            if re.match(r'^-{3,}$', s) or re.match(r'^={3,}$', s):
+                return True
+            # Python keywords that start code statements
+            # (from X import Y  /  import X  /  class X  /  def X ...)
+            if re.match(r'^(from|import|class|def|return|if|else|elif|for|while|try|except|with|raise|assert|pass)\s', s):
+                return True
+            # Any line containing whitespace that is NOT a pip option (-r, -e, -i, --...)
+            # or a URL (contains ://). Valid pip specifiers never have bare spaces.
+            if ' ' in s and not s.startswith('-') and '://' not in s:
+                return True
+            return False
+
+        cleaned_lines = []
+        content_was_dirty = False
+        for line in content.splitlines():
+            stripped = line.strip()
+            if _is_invalid_req_line(stripped):
+                content_was_dirty = True
+                continue  # Drop the bad line
+            cleaned_lines.append(line)
+        if content_was_dirty:
+            content = '\n'.join(cleaned_lines)
+            self._safe_log(job_id, f"🧹 Stripped malformed separator lines from {file_path}", "Requirements Cleanup")
+
+        if not packages and not content_was_dirty:
+            return False
         
-        # Map module names to actual PyPI packages
+        # EXPANDED: Map module names to actual PyPI packages
         pkg_map = {
+            # Auth & Security
             'jwt_utils': 'PyJWT',
             'jose': 'python-jose[cryptography]',
+            'jwt': 'PyJWT',
+            'bcrypt': 'bcrypt',
+            'passlib': 'passlib[bcrypt]',
+            'cryptography': 'cryptography',
+            
+            # Config & Environment
             'dotenv': 'python-dotenv',
-            'email-validator': 'email-validator',
             'pydantic': 'pydantic',
             'pydantic_settings': 'pydantic-settings',
-            'bcrypt': 'bcrypt',
-            'passlib': 'passlib[bcrypt]'
+            'pydantic-settings': 'pydantic-settings',
+            
+            # Validation
+            'email-validator': 'email-validator',
+            'email_validator': 'email-validator',
+            'validators': 'validators',
+            
+            # Web Frameworks
+            'fastapi': 'fastapi',
+            'uvicorn': 'uvicorn[standard]',
+            'starlette': 'starlette',
+            'flask': 'Flask',
+            'django': 'Django',
+            
+            # Database
+            'sqlalchemy': 'SQLAlchemy',
+            'alembic': 'alembic',
+            'psycopg2': 'psycopg2-binary',
+            'pymongo': 'pymongo',
+            'redis': 'redis',
+            
+            # Google Cloud
+            'google.cloud.firestore': 'google-cloud-firestore',
+            'google.cloud.storage': 'google-cloud-storage',
+            'google.cloud.secretmanager': 'google-cloud-secret-manager',
+            'firebase_admin': 'firebase-admin',
+            
+            # HTTP Clients
+            'requests': 'requests',
+            'httpx': 'httpx',
+            'aiohttp': 'aiohttp',
+            
+            # Data Processing
+            'pandas': 'pandas',
+            'numpy': 'numpy',
+            'PIL': 'Pillow',
+            'pillow': 'Pillow',
+            
+            # Utilities
+            'python_magic': 'python-magic',
+            'magic': 'python-magic',
+            'dateutil': 'python-dateutil',
+            'yaml': 'PyYAML',
+            'pyyaml': 'PyYAML',
+            'toml': 'toml',
+            'click': 'click',
+            'tqdm': 'tqdm',
+            'pytest': 'pytest'
         }
         
         # CRITICAL: Filter out invalid package names (model names, local modules, etc.)
@@ -1540,7 +1935,7 @@ class DeploymentFixer:
         for pkg in packages:
             # Skip invalid packages
             if pkg.lower() in invalid_packages:
-                self.job_manager.log(job_id, f"⏭️ Skipping invalid package: {pkg} (likely a model/module name)", "Package Filter")
+                self._safe_log(job_id, f"⏭️ Skipping invalid package: {pkg} (likely a model/module name)", "Package Filter")
                 continue
             
             real_pkg = pkg_map.get(pkg, pkg)
@@ -1550,7 +1945,7 @@ class DeploymentFixer:
             is_valid_prefix = any(real_pkg.startswith(prefix) for prefix in ['python-', 'google-', 'firebase-', 'django-', 'flask-', 'fastapi'])
             
             if not is_known and not is_valid_prefix:
-                self.job_manager.log(job_id, f"⏭️ Skipping unknown package: {pkg} (not in package map)", "Package Filter")
+                self._safe_log(job_id, f"⏭️ Skipping unknown package: {pkg} (not in package map)", "Package Filter")
                 continue
             
             # Use regex for more robust package check (avoid matching 'pydantic' in 'pydantic-settings')
@@ -1563,9 +1958,30 @@ class DeploymentFixer:
         with open(local, 'w') as f:
             f.write(content)
         
-        final = file_path.replace('backend/', '')
-        owner, repo = github_repo.split('/')
-        return self.github_service.commit_file(owner, repo, github_branch, final, content, f"[PROG] {final}")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_jsx_inline_comment_syntax(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix common TS1005 JSX parse errors caused by inline JSX comments inside opening tags."""
+        local = os.path.join(repo_dir, file_path)
+        if not os.path.exists(local):
+            return False
+
+        with open(local, 'r') as f:
+            original_content = f.read()
+
+        content = original_content
+        # Remove JSX comments that are embedded between attributes in a tag.
+        # Example: onClick={...} {/* comment */} className="..."
+        content = re.sub(r"\s*\{\s*/\*.*?\*/\s*\}\s*", " ", content, flags=re.DOTALL)
+
+        if content == original_content:
+            return False
+
+        with open(local, 'w') as f:
+            f.write(content)
+
+        self._safe_log(job_id, f"✅ Removed inline JSX comments causing TS1005 in {file_path}", "JSX Syntax Fix")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
     
     async def _fix_package_json(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add missing packages and regenerate package-lock.json"""
@@ -1588,11 +2004,22 @@ class DeploymentFixer:
             'react-icons': '^5.0.0',
             '@heroicons/react': '^2.1.0',
             'react-hook-form': '^7.50.0',
+            'class-variance-authority': '^0.7.1',
+            'clsx': '^2.1.1',
+            'tailwind-merge': '^2.5.2',
             '@types/react': '^18.2.0',
             '@types/node': '^20.11.0'
         }
         
         for pkg in packages:
+            # Never add local aliases/paths as npm dependencies.
+            if pkg.startswith(('@/','./','../','~/', '/')) or ':' in pkg or '\\' in pkg:
+                self._safe_log(job_id, f"⏭️ Skipping invalid/local alias dependency: {pkg}", "Package Filter")
+                self._invalid_npm_packages.add(pkg)
+                continue
+            if pkg in self._invalid_npm_packages:
+                self._safe_log(job_id, f"⏭️ Skipping known invalid npm package: {pkg}", "Package Filter")
+                continue
             if pkg not in deps and pkg not in dev_deps:
                 if pkg.startswith('@testing-library') or pkg in ['jest', 'ts-jest', '@types/jest']:
                     dev_deps[pkg] = '^14.0.0' if pkg.startswith('@testing-library') else 'latest'
@@ -1600,7 +2027,7 @@ class DeploymentFixer:
                     # Use known version for well-known packages
                     deps[pkg] = known_packages[pkg]
                     modified = True
-                    self.job_manager.log(job_id, f"✅ Adding well-known package: {pkg}@{known_packages[pkg]}", "Package Add")
+                    self._safe_log(job_id, f"✅ Adding well-known package: {pkg}@{known_packages[pkg]}", "Package Add")
                 elif pkg.startswith(('@', 'react-', 'next-')):
                     # Common frontend packages
                     deps[pkg] = 'latest'
@@ -1636,13 +2063,9 @@ class DeploymentFixer:
             
             if result.returncode == 0:
                 self.job_manager.log(job_id, "✅ Successfully regenerated package-lock.json", "Lock File Sync")
-                
-                # Commit both package.json and package-lock.json
-                final = file_path.replace('frontend/', '')
-                owner, repo = github_repo.split('/')
-                
-                # Commit package.json
-                if not self.github_service.commit_file(owner, repo, github_branch, final, content, f"[PROG] {final}"):
+
+                # Commit both package.json and package-lock.json using file-based routing
+                if not await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch):
                     return False
                 
                 # Commit package-lock.json
@@ -1650,24 +2073,80 @@ class DeploymentFixer:
                 if os.path.exists(lock_file_path):
                     with open(lock_file_path, 'r') as f:
                         lock_content = f.read()
-                    
-                    lock_final = 'package-lock.json' if 'frontend/' in file_path else final.replace('package.json', 'package-lock.json')
-                    self.github_service.commit_file(owner, repo, github_branch, lock_final, lock_content, f"[PROG] Sync {lock_final}")
+
+                    lock_file_repo_path = file_path.replace('package.json', 'package-lock.json')
+                    await self._commit_programmatic_fix(job_id, lock_file_repo_path, lock_content, github_repo, github_branch)
                     self.job_manager.log(job_id, "✅ Committed synchronized package-lock.json", "Lock File Sync")
                 
                 return True
             else:
                 self.job_manager.log(job_id, f"⚠️ Failed to regenerate lock file: {result.stderr[:200]}", "Lock File Warning", level="WARNING")
+                # Auto-recover from invalid/non-existent package versions causing ETARGET
+                etarget_match = re.search(r"No matching version found for ([^@\s]+)@([^\s.]+[^\s]*)", result.stderr)
+                if etarget_match:
+                    bad_pkg = etarget_match.group(1).strip()
+                    self._invalid_npm_packages.add(bad_pkg)
+                    removed = False
+                    if bad_pkg in deps:
+                        del deps[bad_pkg]
+                        removed = True
+                    if bad_pkg in dev_deps:
+                        del dev_deps[bad_pkg]
+                        removed = True
+                    if removed:
+                        self._safe_log(job_id, f"🧹 Removed invalid package causing ETARGET: {bad_pkg}", "Package Recovery")
+                        data['dependencies'] = deps
+                        data['devDependencies'] = dev_deps
+                        content = json.dumps(data, indent=2)
+                        with open(local, 'w') as f:
+                            f.write(content)
+                else:
+                    # Auto-recover from npm E404 package-not-found responses.
+                    e404_match = re.search(r"'([^']+@\S+)' is not in this registry", result.stderr)
+                    if e404_match:
+                        pkg_with_version = e404_match.group(1)
+                        bad_pkg = pkg_with_version.split('@')[0] if '@' in pkg_with_version else pkg_with_version
+                        self._invalid_npm_packages.add(bad_pkg)
+                        removed = False
+                        if bad_pkg in deps:
+                            del deps[bad_pkg]
+                            removed = True
+                        if bad_pkg in dev_deps:
+                            del dev_deps[bad_pkg]
+                            removed = True
+                        if removed:
+                            self._safe_log(job_id, f"🧹 Removed package not found in npm registry: {bad_pkg}", "Package Recovery")
+                            data['dependencies'] = deps
+                            data['devDependencies'] = dev_deps
+                            content = json.dumps(data, indent=2)
+                            with open(local, 'w') as f:
+                                f.write(content)
+                    else:
+                        invalid_name_match = re.search(r'Invalid package name "([^"]+)"|Invalid package name \'([^\']+)\'', result.stderr)
+                        invalid_pkg = (invalid_name_match.group(1) if invalid_name_match and invalid_name_match.group(1) else (invalid_name_match.group(2) if invalid_name_match else None))
+                        if invalid_pkg:
+                            self._invalid_npm_packages.add(invalid_pkg)
+                            removed = False
+                            if invalid_pkg in deps:
+                                del deps[invalid_pkg]
+                                removed = True
+                            if invalid_pkg in dev_deps:
+                                del dev_deps[invalid_pkg]
+                                removed = True
+                            if removed:
+                                self._safe_log(job_id, f"🧹 Removed invalid package name: {invalid_pkg}", "Package Recovery")
+                                data['dependencies'] = deps
+                                data['devDependencies'] = dev_deps
+                                content = json.dumps(data, indent=2)
+                                with open(local, 'w') as f:
+                                    f.write(content)
+
                 # Still commit package.json even if lock regeneration failed
-                final = file_path.replace('frontend/', '')
-                owner, repo = github_repo.split('/')
-                return self.github_service.commit_file(owner, repo, github_branch, final, content, f"[PROG] {final}")
+                return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
         except Exception as e:
             self.job_manager.log(job_id, f"⚠️ Exception during lock file regen: {str(e)[:100]}", "Lock File Error", level="WARNING")
             # Still commit package.json
-            final = file_path.replace('frontend/', '')
-            owner, repo = github_repo.split('/')
-            return self.github_service.commit_file(owner, repo, github_branch, final, content, f"[PROG] {final}")
+            return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
     
     async def _fix_backend_model(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add missing classes"""
@@ -1698,17 +2177,7 @@ class DeploymentFixer:
         with open(local, 'w') as f:
             f.write(content)
         
-        # Route to backend repo
-        job_data = job_store.get(job_id, {})
-        all_repos = job_data.get("all_repos", [])
-        target_repo = github_repo
-        backend_repo = next((r for r in all_repos if r.get('type') == 'backend'), None)
-        if backend_repo:
-            target_repo = f"{backend_repo['owner']}/{backend_repo['repo']}"
-        
-        final = file_path.replace('backend/', '')
-        owner, repo = target_repo.split('/')
-        return self.github_service.commit_file(owner, repo, github_branch, final, content, f"[PROG] {final}")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
     
     async def _fix_test_file(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add jest types"""
@@ -1724,40 +2193,168 @@ class DeploymentFixer:
             with open(local, 'w') as f:
                 f.write(content)
             
-            final = file_path.replace('frontend/', '')
-            owner, repo = github_repo.split('/')
-            return self.github_service.commit_file(owner, repo, github_branch, final, content, f"[PROG] {final}")
+            return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
         return False
     
     async def _fix_type_file(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add missing type exports"""
         missing = file_info.get('missing', [])
-        if not missing:
-            return False
-        
         local = os.path.join(repo_dir, file_path)
         original_content = file_info.get('content', '')
         content = original_content
-        
-        if len(content) < 100:
-            content = "// Auto-generated\n\n"
-            for item in missing:
-                content += f"export interface {item.strip()} {{\n  // TODO\n}}\n\n"
-        else:
-            for item in missing:
-                if f"export interface {item.strip()}" not in content:
-                    content += f"\nexport interface {item.strip()} {{\n  // TODO\n}}\n"
-        
+
+        # Clean up invalid interfaces accidentally generated from error text in previous attempts.
+        content = re.sub(
+            r"\n?export interface (?:TypeScript error|ImportError|Missing dependency)[^\n]*\{\n\s*// TODO\n\}\n?",
+            "\n",
+            content,
+            flags=re.MULTILINE,
+        )
+
+        # Extract only valid identifiers from "Missing export: X" messages.
+        valid_missing_exports = []
+        for item in missing:
+            if not isinstance(item, str):
+                continue
+            candidate = None
+            match = re.search(r"Missing export:\s*([A-Za-z_][A-Za-z0-9_]*)", item)
+            if match:
+                candidate = match.group(1)
+            if candidate is None:
+                # Also parse legacy dependency messages:
+                # "... 'CreateTicketPayload' not found in '../types/ticket'"
+                match = re.search(r"'([A-Za-z_][A-Za-z0-9_]*)'\s+not found in", item)
+                if match:
+                    candidate = match.group(1)
+            elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", item.strip()):
+                candidate = item.strip()
+            if candidate and candidate not in valid_missing_exports:
+                valid_missing_exports.append(candidate)
+
+        if valid_missing_exports:
+            if len(content.strip()) < 20:
+                content = "// Auto-generated\n\n"
+            for name in valid_missing_exports:
+                if not re.search(rf"\b(interface|type|class|enum)\s+{re.escape(name)}\b", content):
+                    content += f"\nexport interface {name} {{\n  // TODO\n}}\n"
+
         if content == original_content:
             return False
 
         with open(local, "w") as f:
             f.write(content)
         
-        final = file_path.replace("frontend/", "")
-        owner, repo = github_repo.split("/")
-        return self.github_service.commit_file(owner, repo, github_branch, final, content, f"[PROG] {final}")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
     
+    async def _fix_backend_prefix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """NEW: Programmatically remove 'backend.' prefix from imports"""
+        local = os.path.join(repo_dir, file_path)
+        if not os.path.exists(local):
+            return False
+        
+        with open(local, 'r') as f:
+            original_content = f.read()
+        
+        content = original_content
+        
+        # Replace all "from backend.X" with "from X"
+        content = re.sub(r'from backend\.(\w+)', r'from \1', content)
+        
+        # Also handle "import backend.X" → "import X" (less common but possible)
+        content = re.sub(r'import backend\.(\w+)', r'import \1', content)
+        
+        if content == original_content:
+            return False  # No changes needed
+        
+        # Write the fixed content
+        with open(local, 'w') as f:
+            f.write(content)
+        
+        self._safe_log(job_id, f"✅ Removed 'backend.' prefix from imports in {file_path}", "Backend Prefix Fix")
+        
+        # Commit to GitHub
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _create_missing_backend_module(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Create a missing backend module file reported by static analysis."""
+        local = os.path.join(repo_dir, file_path)
+        if os.path.exists(local):
+            return False
+
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        module_name = os.path.basename(file_path).replace('.py', '')
+        content = (
+            '"""Auto-generated shim module for unresolved import path."""\n'
+            f"# Module: {module_name}\n"
+            "\n"
+        )
+
+        with open(local, 'w') as f:
+            f.write(content)
+
+        self._safe_log(job_id, f"✅ Created missing backend module shim: {file_path}", "Programmatic Create")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+    
+    async def _create_next_config(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Create a standard next.config.js if it is missing from the frontend repo."""
+        local = os.path.join(repo_dir, file_path)
+        if os.path.exists(local) and os.path.getsize(local) > 0:
+            # File already exists and is non-empty - nothing to do
+            return False
+
+        content = (
+            "/** @type {import('next').NextConfig} */\n"
+            "const nextConfig = {\n"
+            "  reactStrictMode: true,\n"
+            "};\n"
+            "\n"
+            "module.exports = nextConfig;\n"
+        )
+
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self._safe_log(job_id, f"✅ Created missing next.config.js with standard boilerplate", "Programmatic Create")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _create_tsconfig(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Create a standard tsconfig.json if it is missing from the frontend repo."""
+        local = os.path.join(repo_dir, file_path)
+        if os.path.exists(local) and os.path.getsize(local) > 0:
+            # File already exists and is non-empty - nothing to do
+            return False
+
+        tsconfig = {
+            "compilerOptions": {
+                "target": "es5",
+                "lib": ["dom", "dom.iterable", "esnext"],
+                "allowJs": True,
+                "skipLibCheck": True,
+                "strict": True,
+                "noEmit": True,
+                "esModuleInterop": True,
+                "module": "esnext",
+                "moduleResolution": "bundler",
+                "resolveJsonModule": True,
+                "isolatedModules": True,
+                "jsx": "preserve",
+                "incremental": True,
+                "plugins": [{"name": "next"}],
+                "paths": {"@/*": ["./src/*"]}
+            },
+            "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+            "exclude": ["node_modules"]
+        }
+        content = json.dumps(tsconfig, indent=2) + "\n"
+
+        os.makedirs(os.path.dirname(local), exist_ok=True)
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self._safe_log(job_id, f"✅ Created missing tsconfig.json with standard Next.js boilerplate", "Programmatic Create")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     def _find_dependency_file(self, repo_dir, filename):
         for d in ['frontend', 'backend', '']:
             p = os.path.join(repo_dir, d, filename)

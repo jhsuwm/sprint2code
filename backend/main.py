@@ -33,15 +33,14 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configure CORS for Next.js frontend
+# Configure CORS for Next.js frontend (Local development only)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # Next.js development server
-        "https://*.run.app",      # Google Cloud Run domains
-        "https://vacation-planner-frontend-*-uc.a.run.app",  # Specific Cloud Run frontend
-        "https://roosterjourney.com",  # Custom domain
-        "https://www.roosterjourney.com"  # Custom domain with www
+        "http://localhost:3001",  # Alternative Next.js port
+        "http://127.0.0.1:3000",  # Localhost alternative
+        "http://127.0.0.1:3001",  # Localhost alternative
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],

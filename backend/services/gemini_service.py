@@ -151,6 +151,27 @@ Desc: Create comprehensive test coverage
         prompt = f"""
         You are an expert Autonomous Developer Agent.
         
+        🚨 CRITICAL REPOSITORY STRUCTURE - READ THIS FIRST! 🚨
+        
+        ==================================================================================
+        SEPARATE GIT REPOSITORIES - DO NOT USE "backend/" OR "frontend/" PREFIXES!
+        ==================================================================================
+        
+        ⚠️ FRONTEND and BACKEND are in SEPARATE git repositories!
+        ⚠️ DO NOT include "backend/" or "frontend/" prefixes in your file paths!
+        
+        ✅ CORRECT file paths examples (separate repos):
+           - Backend repo: models/user.py, auth/jwt_utils.py, services/auth_service.py, routes/auth_routes.py, main.py
+           - Frontend repo: src/types/user.ts, src/api/auth.ts, src/components/Login.tsx, app/page.tsx
+        
+        ❌ WRONG file paths (will cause FAILURE):
+           - backend/models/user.py ← WRONG! Backend is its own repo root
+           - frontend/src/types/user.ts ← WRONG! Frontend is its own repo root
+        
+        🎯 REMEMBER: Each repo is standalone - no "backend/" or "frontend/" folder prefixes!
+        
+        ==================================================================================
+        
         Your task is to create a detailed technical work plan for implementing the following requirements.
         
         REQUIREMENTS:
@@ -207,25 +228,25 @@ Desc: Create comprehensive test coverage
         
         🔴 CRITICAL: You MUST generate subtasks in this EXACT order to prevent ImportError failures!
         
-        Backend Python Projects - MANDATORY ORDER:
-        1. SUBTASK 1: "Setup Backend Dependencies" → requirements.txt, .env.example, backend/__init__.py
-        2. SUBTASK 2: "Create Data Models" → backend/models/*.py (ALL model files)
-        3. SUBTASK 3: "Setup Authentication Utilities" → backend/auth/*.py (auth_utils.py, jwt_utils.py, dependencies.py)
-        4. SUBTASK 4: "Setup Database Client" → backend/database/*.py (firestore_client.py with lazy initialization)
-        5. SUBTASK 5: "Create Service Layer" → backend/services/*.py (ALL service files)
-        6. SUBTASK 6: "Create API Routes" → backend/routes/*.py (ALL route files)
-        7. SUBTASK 7: "Create Main Application" → backend/main.py
-        8. SUBTASK 8: "Add Tests" → backend/tests/**/*.py (unit & integration tests)
+        Backend Python Projects - MANDATORY ORDER (NO "backend/" prefix - it's the repo root!):
+        1. SUBTASK 1: "Setup Backend Dependencies" → requirements.txt, .env.example, __init__.py
+        2. SUBTASK 2: "Create Data Models" → models/*.py (ALL model files)
+        3. SUBTASK 3: "Setup Authentication Utilities" → auth/*.py (auth_utils.py, jwt_utils.py, dependencies.py)
+        4. SUBTASK 4: "Setup Database Client" → database/*.py (firestore_client.py with lazy initialization)
+        5. SUBTASK 5: "Create Service Layer" → services/*.py (ALL service files)
+        6. SUBTASK 6: "Create API Routes" → routes/*.py (ALL route files)
+        7. SUBTASK 7: "Create Main Application" → main.py
+        8. SUBTASK 8: "Add Tests" → tests/**/*.py (unit & integration tests)
         
-        Frontend TypeScript/React Projects - MANDATORY ORDER:
+        Frontend TypeScript/React Projects - MANDATORY ORDER (NO "frontend/" prefix - it's the repo root!):
         1. SUBTASK 1: "Setup Frontend Configuration" → package.json (with ALL deps!), next.config.js, tsconfig.json, tailwind.config.ts, postcss.config.js, public/.gitkeep
-        2. SUBTASK 2: "Create Type Definitions" → frontend/src/types/*.ts (ALL type files with ALL interfaces/types/enums)
-        3. SUBTASK 3: "Create API Client Layer" → frontend/src/api/*.ts (ALL API functions)
-        4. SUBTASK 4: "Create State Management" → frontend/src/store/*.ts (Zustand stores)
-        5. SUBTASK 5: "Create Reusable Components" → frontend/src/components/**/*.tsx
-        6. SUBTASK 6: "Create Page Components" → frontend/src/app/**/*.tsx OR frontend/src/pages/*.tsx
-        7. SUBTASK 7: "Create Root Layout & Globals" → frontend/src/app/layout.tsx, page.tsx, globals.css
-        8. SUBTASK 8: "Add Tests" → frontend/__tests__/**/*.test.tsx
+        2. SUBTASK 2: "Create Type Definitions" → src/types/*.ts (ALL type files with ALL interfaces/types/enums)
+        3. SUBTASK 3: "Create API Client Layer" → src/api/*.ts (ALL API functions)
+        4. SUBTASK 4: "Create State Management" → src/store/*.ts (Zustand stores)
+        5. SUBTASK 5: "Create Reusable Components" → src/components/**/*.tsx
+        6. SUBTASK 6: "Create Page Components" → app/**/*.tsx OR pages/*.tsx
+        7. SUBTASK 7: "Create Root Layout & Globals" → app/layout.tsx, page.tsx, globals.css
+        8. SUBTASK 8: "Add Tests" → __tests__/**/*.test.tsx
         
         🚨 WHY THIS ORDER IS MANDATORY:
         - Models MUST be created BEFORE services (services import models)
@@ -443,6 +464,143 @@ def implementation():
         CONTEXT: {context}
         PRD: {story_context}
         
+        🚨 CRITICAL REPOSITORY STRUCTURE - READ THIS FIRST! 🚨
+        
+        ==================================================================================
+        SEPARATE GIT REPOSITORIES - DO NOT USE "backend/" OR "frontend/" PREFIXES!
+        ==================================================================================
+        
+        ⚠️ FRONTEND and BACKEND are in SEPARATE git repositories!
+        ⚠️ DO NOT include "backend/" or "frontend/" prefixes in your file paths!
+        ⚠️ DO NOT use "from backend.X" or "from frontend.X" in imports!
+        
+        ✅ CORRECT file paths (separate repos):
+           - Backend repo: models/user.py, auth/jwt_utils.py, services/auth_service.py, routes/auth_routes.py, main.py
+           - Frontend repo: src/types/user.ts, src/api/auth.ts, src/components/Login.tsx, app/page.tsx
+        
+        ❌ WRONG file paths (will cause errors):
+           - backend/models/user.py ← WRONG! Backend is its own repo root
+           - frontend/src/types/user.ts ← WRONG! Frontend is its own repo root
+        
+        ✅ CORRECT Python imports (backend repo):
+           - from models.user import User
+           - from auth.jwt_utils import create_token
+           - from services.auth_service import AuthService
+           - from database.firestore_client import get_client
+        
+        ❌ WRONG Python imports (will cause ImportError):
+           - from backend.models.user import User ← WRONG! No "backend." prefix
+           - from backend.auth.jwt_utils import create_token ← WRONG!
+        
+        🎯 REMEMBER: Each repo is standalone - the directory IS the Python root, not a package!
+        
+        ==================================================================================
+        🚨 CRITICAL: GENERATE ALL DEPENDENT FILES TOGETHER - ZERO TOLERANCE! 🚨
+        ==================================================================================
+        
+        ⛔ DEPLOYMENT WILL FAIL if you reference a file that doesn't exist!
+        
+        **GOLDEN RULE: If file A imports from file B, generate BOTH files in THIS response!**
+        
+        ❌ NEVER DO THIS (causes ImportError - deployment FAILS):
+        Task: "Create auth service"
+        Response:
+          FILE_PATH: services/auth_service.py
+          ---
+          from models.user import User  ← WRONG! models/user.py doesn't exist yet!
+          ---
+        
+        ✅ ALWAYS DO THIS (complete, working code):
+        Task: "Create auth service"
+        Response:
+          FILE_PATH: models/user.py  ← Generate dependency FIRST
+          ---
+          from pydantic import BaseModel
+          class User(BaseModel):
+              id: str
+              email: str
+          ---
+          
+          FILE_PATH: services/auth_service.py  ← Then generate file that uses it
+          ---
+          from models.user import User  ← NOW this works!
+          ---
+        
+        🔴 CRITICAL EXAMPLES - WHAT YOU MUST DO:
+        
+        1. If you generate `routes/auth_routes.py` that imports from `services.auth_service`,
+           YOU MUST ALSO generate `services/auth_service.py` in the SAME response!
+        
+        2. If you generate `services/ticket_service.py` that imports from `models.ticket`,
+           YOU MUST ALSO generate `models/ticket.py` in the SAME response!
+        
+        3. If you generate a component that imports from `src/types/user.ts`,
+           YOU MUST ALSO generate `src/types/user.ts` in the SAME response!
+        
+        4. If you generate code that imports `from database.firestore_client import get_client`,
+           YOU MUST ALSO generate `database/firestore_client.py` in the SAME response!
+        
+        ⚠️ ZERO EXCEPTIONS: Every single file you reference MUST be generated together!
+        
+        ✅ CORRECT: Generate ALL files that depend on each other in ONE response
+        ❌ WRONG: Generate one file now, assume others exist or will be generated later
+        
+        💡 PRO TIP: When generating:
+        - routes → ALSO generate the services and models they import
+        - services → ALSO generate the models and utilities they import
+        - pages → ALSO generate the types and API functions they import
+        - components → ALSO generate the types and utilities they import
+        
+        🎯 BOTTOM LINE: Your response must be COMPLETE and SELF-CONTAINED!
+        ==================================================================================
+        
+        ==================================================================================
+        🚨 CRITICAL: THIRD-PARTY PACKAGES vs LOCAL FILES - KNOW THE DIFFERENCE! 🚨
+        ==================================================================================
+        
+        ⛔ NEVER try to create files for third-party packages - they go in requirements.txt!
+        
+        **COMMON MISTAKE THAT CAUSES DEPLOYMENT FAILURES:**
+        
+        ❌ WRONG - Creating files for external packages:
+        FILE_PATH: pydantic_settings.py  ← WRONG! This is a PyPI package!
+        FILE_PATH: firebase_admin.py  ← WRONG! This is a PyPI package!
+        FILE_PATH: google/cloud/firestore.py  ← WRONG! This is a PyPI package!
+        
+        ✅ CORRECT - Add to requirements.txt:
+        FILE_PATH: requirements.txt
+        ---
+        pydantic-settings==2.0.0
+        firebase-admin==6.2.0
+        google-cloud-firestore==2.11.0
+        ---
+        
+        🔴 EXTERNAL PACKAGES (add to requirements.txt, DON'T create files):
+        - pydantic, pydantic-settings, email-validator
+        - fastapi, uvicorn, python-jose, passlib, python-multipart
+        - firebase-admin, google-cloud-firestore, google-cloud-storage
+        - requests, httpx, aiohttp
+        - python-dotenv, PyYAML
+        - Any package you import that starts with: google, firebase, pydantic, fastapi, etc.
+        
+        🟢 LOCAL FILES (create these files):
+        - models/user.py, auth/jwt_utils.py, services/auth_service.py
+        - database/firestore_client.py, config/settings.py
+        - routes/auth_routes.py, main.py
+        - Any file you create yourself for YOUR application
+        
+        💡 GOLDEN RULE:
+        - If it's on PyPI (pip install X) → Add to requirements.txt
+        - If it's YOUR code → Generate the file
+        
+        🎯 HOW TO KNOW:
+        - "from pydantic_settings import BaseSettings" → pydantic-settings is external → requirements.txt
+        - "from firebase_admin import credentials" → firebase-admin is external → requirements.txt
+        - "from models.user import User" → models/user.py is YOUR file → GENERATE IT
+        - "from auth.jwt_utils import create_token" → auth/jwt_utils.py is YOUR file → GENERATE IT
+        
+        ==================================================================================
+        
         MANDATORY RESPONSE FORMAT:
         For each file you generate, use the following EXACT structure:
         
@@ -451,14 +609,29 @@ def implementation():
         [file content here]
         ---
         
-        Example:
-        FILE_PATH: src/app.py
+        Example for BACKEND file:
+        FILE_PATH: models/user.py
         ---
-        print("hello world")
+        from pydantic import BaseModel
+
+        class User(BaseModel):
+            id: str
+            email: str
+        ---
+        
+        Example for FRONTEND file:
+        FILE_PATH: src/types/user.ts
+        ---
+        export interface User {{
+          id: string;
+          email: string;
+        }}
         ---
         
         🚨 CRITICAL: Use the exact markers above. Do NOT use markdown code blocks like ```python.
         🚨 CRITICAL: Ensure every file is wrapped in '---' separators.
+        🚨 CRITICAL: DO NOT add "backend/" or "frontend/" prefixes to paths!
+        🚨 CRITICAL: DO NOT use "from backend.X" or "from frontend.X" imports!
         """
         
         # Log generation attempt
@@ -534,33 +707,55 @@ def implementation():
                     return [{'file_path': 'generated_code.py', 'content': block} for block in code_blocks]
             return []
 
-        parts = response.split(active_marker)
-        logger.info(f"🔍 [GeminiService] Split response into {len(parts)} parts using marker '{active_marker}'")
-        
-        for part in parts[1:]:
-            if '---' not in part: 
-                logger.warning("⚠️ [GeminiService] Part missing '---' separator, skipping")
-                continue
-            lines = part.split('\n')
-            file_path = lines[0].strip()
-            
+        # Normalize line endings for robust multi-line parsing
+        normalized = response.replace('\r\n', '\n').replace('\r', '\n')
+
+        # Robust FILE block parser:
+        # FILE_PATH: path
+        # ---
+        # <content... can itself contain '---'>
+        # ---
+        # FILE_PATH: next...
+        block_pattern = re.compile(
+            r"(?:^|\n)(?:FILE_PATH:|FILE:)\s*(?P<path>[^\n]+)\n---\n(?P<content>.*?)(?:\n---(?=\n(?:FILE_PATH:|FILE:)|\n*$)|\n\Z)",
+            re.DOTALL
+        )
+        matches = list(block_pattern.finditer(normalized))
+        logger.info(f"🔍 [GeminiService] Parsed {len(matches)} FILE block(s) using regex parser")
+
+        for m in matches:
+            file_path = m.group('path').strip()
+            content = m.group('content').strip()
+
             # Clean up path if it contains backticks or other markdown
             file_path = re.sub(r'[`*]', '', file_path).strip()
-            
-            content_start = part.find('---')
-            remaining = part[content_start + 3:]
-            
-            # Handle both '---' end marker and end of string
-            content_end = remaining.find('---')
-            content = remaining[:content_end].strip() if content_end != -1 else remaining.strip()
-            
+
             # Remove leading/trailing code block markers if AI included them inside the dashes
             content = re.sub(r'^```(?:\w+)?\n', '', content)
             content = re.sub(r'\n```$', '', content)
-            
+
             if file_path and content:
                 files.append({'file_path': file_path, 'content': content})
                 logger.info(f"✅ [GeminiService] Successfully parsed file: {file_path} ({len(content)} chars)")
+
+        # Backward-compatible fallback for malformed blocks
+        if not files:
+            parts = normalized.split(active_marker)
+            logger.info(f"🔍 [GeminiService] Fallback split into {len(parts)} part(s) using marker '{active_marker}'")
+            for part in parts[1:]:
+                if '---' not in part:
+                    continue
+                lines = part.split('\n')
+                file_path = re.sub(r'[`*]', '', lines[0]).strip()
+                content_start = part.find('---')
+                remaining = part[content_start + 3:]
+                content_end = remaining.rfind('---')
+                content = (remaining[:content_end] if content_end > 0 else remaining).strip()
+                content = re.sub(r'^```(?:\w+)?\n', '', content)
+                content = re.sub(r'\n```$', '', content)
+                if file_path and content:
+                    files.append({'file_path': file_path, 'content': content})
+                    logger.info(f"✅ [GeminiService] Fallback parsed file: {file_path} ({len(content)} chars)")
         
         if not files:
             logger.error("❌ [GeminiService] Failed to extract any valid files from response despite finding markers!")

@@ -408,9 +408,16 @@ export default function AutonomousDevDashboard() {
                   </div>
                 ) : (
                   <>
-                    {logs.map((log, i) => (
-                      <div key={i} className="font-mono text-xs text-green-400">{log}</div>
-                    ))}
+                    {logs.map((log, i) => {
+                      // Determine color based on log content
+                      let colorClass = 'text-green-400'; // Default: success/info
+                      if (log.includes('[ERROR]') || log.includes('❌') || log.includes('FAILED') || log.includes('Error:')) {
+                        colorClass = 'text-red-400';
+                      } else if (log.includes('[WARNING]') || log.includes('⚠️')) {
+                        colorClass = 'text-yellow-400';
+                      }
+                      return <div key={i} className={`font-mono text-xs ${colorClass}`}>{log}</div>;
+                    })}
                     <div ref={logsEndRef} />
                   </>
                 )}
@@ -422,8 +429,41 @@ export default function AutonomousDevDashboard() {
         {/* Right Panel - App Logs */}
         <div className="w-1/4 flex flex-col gap-4 h-full overflow-hidden">
           {appStatus && (
-            <div className={`px-4 py-2 rounded-lg font-semibold text-center ${appStatus === 'HEALTHY' ? 'bg-green-900/30 text-green-300' : 'bg-red-900/30 text-red-300'}`}>
-              App: {appStatus}
+            <div className="flex flex-col gap-2">
+              <div className={`px-4 py-2 rounded-lg font-semibold text-center ${appStatus === 'HEALTHY' ? 'bg-green-900/30 text-green-300' : 'bg-red-900/30 text-red-300'}`}>
+                App: {appStatus}
+              </div>
+              {(appStatus === 'VALIDATION_FAILED' || appStatus === 'STARTUP_FAILED') && jobId && (
+                <button
+                  onClick={async () => {
+                    try {
+                      const token = getAuthToken();
+                      const res = await fetch(`${BACKEND_URL}/autonomous-dev/rerun-deployment/${jobId}`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        alert('✅ Deployment rerun started! Check logs for progress.');
+                        // Continue polling to see the updated status
+                        pollProgress(jobId);
+                      } else {
+                        const error = await res.json();
+                        alert(`❌ Failed to rerun: ${error.detail || 'Unknown error'}`);
+                      }
+                    } catch (e) {
+                      console.error(e);
+                      alert('❌ Failed to rerun deployment. Please try again.');
+                    }
+                  }}
+                  className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-2 rounded-lg text-sm font-semibold transition-all duration-300 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 flex items-center justify-center"
+                >
+                  <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                  Rerun Deployment
+                </button>
+              )}
             </div>
           )}
           
@@ -438,9 +478,16 @@ export default function AutonomousDevDashboard() {
                   <div className="h-full flex items-center justify-center text-slate-500 italic">No logs yet</div>
                 ) : (
                   <>
-                    {frontendLogs.map((log, i) => (
-                      <div key={i} className="font-mono text-xs text-green-300">{log}</div>
-                    ))}
+                    {frontendLogs.map((log, i) => {
+                      // Determine color based on log content
+                      let colorClass = 'text-green-300'; // Default: success/info
+                      if (log.includes('ERROR') || log.includes('❌') || log.includes('FAILED') || log.includes('Error:') || log.includes('error')) {
+                        colorClass = 'text-red-400';
+                      } else if (log.includes('WARNING') || log.includes('⚠️') || log.includes('warn')) {
+                        colorClass = 'text-yellow-400';
+                      }
+                      return <div key={i} className={`font-mono text-xs ${colorClass}`}>{log}</div>;
+                    })}
                     <div ref={frontendLogsEndRef} />
                   </>
                 )}
@@ -459,9 +506,16 @@ export default function AutonomousDevDashboard() {
                   <div className="h-full flex items-center justify-center text-slate-500 italic">No logs yet</div>
                 ) : (
                   <>
-                    {backendLogs.map((log, i) => (
-                      <div key={i} className="font-mono text-xs text-green-300">{log}</div>
-                    ))}
+                    {backendLogs.map((log, i) => {
+                      // Determine color based on log content
+                      let colorClass = 'text-green-300'; // Default: success/info
+                      if (log.includes('ERROR') || log.includes('❌') || log.includes('FAILED') || log.includes('Error:') || log.includes('error')) {
+                        colorClass = 'text-red-400';
+                      } else if (log.includes('WARNING') || log.includes('⚠️') || log.includes('warn')) {
+                        colorClass = 'text-yellow-400';
+                      }
+                      return <div key={i} className={`font-mono text-xs ${colorClass}`}>{log}</div>;
+                    })}
                     <div ref={backendLogsEndRef} />
                   </>
                 )}
