@@ -1440,8 +1440,13 @@ class DeploymentFixer:
                 missing_name = match.group(2)
                 target_module = match.group(3)
                 
+                # Fix: Strip .py from the importer before path conversion
+                src_module = importer_path
+                if src_module.endswith('.py'):
+                    src_module = src_module[:-3]
+                
                 # PRIMARY FIX: The dependency file that's missing the export
-                file_path = self._resolve_import_path(importer_path, target_module, repo_dir)
+                file_path = self._resolve_import_path(src_module, target_module, repo_dir)
                 file_path = self._normalize_file_path(file_path)
                 
                 if file_path not in files:
@@ -1547,7 +1552,11 @@ class DeploymentFixer:
                 correct_import = wrong_import
                 
                 # The file that has the wrong import
-                file_path = f"backend/{file_with_error.replace('.', '/')}.py"
+                # Fix: Strip .py if it exists before replacing dots
+                module_base = file_with_error
+                if module_base.endswith('.py'):
+                    module_base = module_base[:-3]
+                file_path = f"backend/{module_base.replace('.', '/')}.py"
                 file_path = self._normalize_file_path(file_path)
                 
                 if file_path not in files:
@@ -1662,6 +1671,47 @@ class DeploymentFixer:
         
         return files
     
+    async def _refresh_frontend_dependencies(self, repo_dir: str, job_id: str) -> bool:
+        """Shared frontend dependency refresh logic (programmatic or worker)."""
+        frontend_dir = os.path.join(repo_dir, 'frontend')
+        package_json = os.path.join(frontend_dir, 'package.json')
+        if not os.path.exists(package_json):
+            return False
+
+        # Always use npm install instead of npm ci in the auto-fix loop. 
+        # npm ci is too fragile as it requires package.json and package-lock.json to be in exact sync,
+        # which is frequently not the case when AI is adding/removing dependencies.
+        npm_cmd = ['npm', 'install', '--prefer-offline', '--no-audit']
+        try:
+            self._safe_log(job_id, f"📦 Refreshing frontend deps in {repo_dir} ({' '.join(npm_cmd)})", "Environment")
+            process = await asyncio.create_subprocess_exec(
+                *npm_cmd,
+                cwd=frontend_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                fallback_cmd = ['npm', 'install', '--prefer-offline', '--no-audit']
+                self._safe_log(job_id, f"⚠️ Dependency refresh failed, retrying with {' '.join(fallback_cmd)}", "Environment", level="WARNING")
+                
+                fallback_proc = await asyncio.create_subprocess_exec(
+                    *fallback_cmd,
+                    cwd=frontend_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                f_stdout, f_stderr = await fallback_proc.communicate()
+                
+                if fallback_proc.returncode != 0:
+                    self._safe_log(job_id, f"❌ Dependency refresh failed: {f_stderr.decode()[:500]}", "Environment", level="ERROR")
+                    return False
+            return True
+        except Exception as e:
+            self._safe_log(job_id, f"❌ Dependency refresh error: {e}", "Environment", level="ERROR")
+            return False
+
     def _normalize_file_path(self, path: str) -> str:
         """Normalize file path to prevent duplication (e.g., frontend/src/src/api -> frontend/src/api)"""
         # Remove duplicate path segments and current directory markers

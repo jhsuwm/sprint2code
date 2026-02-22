@@ -72,47 +72,9 @@ class AutoFixWorker:
                     except Exception:
                         pass
 
-    def _refresh_frontend_dependencies(self, repo_dir: str, job_id: str) -> bool:
-        """Install/update frontend deps when package.json is changed during a fix attempt."""
-        frontend_dir = os.path.join(repo_dir, 'frontend')
-        package_json = os.path.join(frontend_dir, 'package.json')
-        if not os.path.exists(package_json):
-            return False
-
-        lock_exists = os.path.exists(os.path.join(frontend_dir, 'package-lock.json'))
-        npm_cmd = ['npm', 'ci'] if lock_exists else ['npm', 'install', '--prefer-offline', '--no-audit']
-        try:
-            self._log(job_id, f"📦 Worker {self.worker_id}: Refreshing frontend deps ({' '.join(npm_cmd)})", f"Worker {self.worker_id}")
-            result = subprocess.run(
-                npm_cmd,
-                cwd=frontend_dir,
-                capture_output=True,
-                text=True,
-                timeout=180
-            )
-            if result.returncode != 0:
-                # package.json often changes before package-lock is regenerated; fallback to npm install.
-                fallback_cmd = ['npm', 'install', '--prefer-offline', '--no-audit']
-                self._log(job_id, f"⚠️ Worker {self.worker_id}: Dependency refresh failed, retrying with {' '.join(fallback_cmd)}", f"Worker {self.worker_id}")
-                fallback = subprocess.run(
-                    fallback_cmd,
-                    cwd=frontend_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=240
-                )
-                if fallback.returncode != 0:
-                    self._log(
-                        job_id,
-                        f"⚠️ Worker {self.worker_id}: Dependency refresh failed: {fallback.stderr[:500]}",
-                        f"Worker {self.worker_id}"
-                    )
-                    return False
-                return True
-            return True
-        except Exception as e:
-            self._log(job_id, f"⚠️ Worker {self.worker_id}: Dependency refresh error: {e}", f"Worker {self.worker_id}")
-            return False
+    async def _refresh_frontend_dependencies(self, repo_dir: str, job_id: str) -> bool:
+        """Install/update frontend deps via shared fixer logic."""
+        return await self.fixer._refresh_frontend_dependencies(repo_dir, job_id)
     
     async def process_fix_task(self, task: Dict[str, Any]) -> Dict[str, Any]:
         """Process a single file fix task"""
@@ -189,7 +151,7 @@ class AutoFixWorker:
                         # If package.json changed, refresh node_modules before TS validation
                         # so "Cannot find module" checks reflect new dependencies.
                         if any(path.endswith('package.json') for path in stage_paths):
-                            deps_ok = self._refresh_frontend_dependencies(repo_dir, job_id)
+                            deps_ok = await self._refresh_frontend_dependencies(repo_dir, job_id)
                             if deps_ok:
                                 # Keep lockfile synced with package.json in commits to avoid repeated npm ci failures.
                                 lock_rel = "frontend/package-lock.json"
@@ -242,6 +204,12 @@ class AutoFixWorker:
 
                         is_perfect_fix = not file_specific_errors
                         is_net_improvement = attempt == max_attempts and len(all_errors) < baseline_error_count
+                        
+                        # NEW: Reject any fix that introduces an ENVIRONMENT ERROR (e.g. causes tsc to be skipped)
+                        has_env_error = any("ENVIRONMENT ERROR" in err for err in all_errors)
+                        if has_env_error:
+                            is_perfect_fix = False
+                            is_net_improvement = False
 
                         if is_perfect_fix or is_net_improvement:
                             # Guardrail: avoid committing changes that increase total static-analysis errors.

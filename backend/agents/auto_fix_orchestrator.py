@@ -113,10 +113,20 @@ class AutoFixOrchestrator:
                         del files_to_fix[file_path]
             
             if programmatic_fixed:
-                self.job_manager.log(job_id, f"✅ Orchestrator: {len(programmatic_fixed)} programmatic fixes applied", "Orchestrator")
-            
-            if not files_to_fix:
-                return len(programmatic_fixed) > 0
+                self.job_manager.log(job_id, f"✅ Orchestrator: {len(programmatic_fixed)} programmatic fixes applied. Re-validating codebase before AI generation...", "Orchestrator")
+                
+                # NEW: If package.json was fixed, refresh dependencies before re-validating
+                if any(p.endswith('package.json') for p in programmatic_fixed):
+                    self.job_manager.log(job_id, "📦 Orchestrator: Detected package.json update, refreshing local node_modules...", "Orchestrator")
+                    await self.fixer._refresh_frontend_dependencies(repo_dir, job_id)
+
+                # CRITICAL: Re-validate state so AI workers don't work on stale errors
+                all_errors = self.fixer.validator.validate_all(repo_dir)
+                files_to_fix = self.fixer._parse_all_errors(all_errors, repo_dir)
+                
+                if not files_to_fix:
+                    self.job_manager.log(job_id, "✅ Orchestrator: All errors resolved via programmatic fixes", "Orchestrator")
+                    return True
 
             # Skip files that repeatedly failed with the exact same error signature
             filtered_files_to_fix = {}

@@ -87,6 +87,9 @@ class DeploymentValidator:
         if not os.path.exists(frontend_dir):
             return []
 
+        if not os.path.exists(os.path.join(frontend_dir, 'node_modules')):
+            return ["ENVIRONMENT ERROR: TypeScript property validation skipped because 'node_modules' is missing. Run 'npm install'."]
+
         types_map = {} # { 'TypeName': { 'prop1', 'prop2', ... } }
         function_return_types = {} # { 'functionName': 'ReturnType' }
         function_param_types = {} # { 'functionName': { 'paramName': 'TypeName' } }
@@ -336,9 +339,9 @@ class DeploymentValidator:
         if not os.path.exists(frontend_dir) or not os.path.exists(os.path.join(frontend_dir, 'tsconfig.json')):
             return []
         
-        if not os.path.exists(os.path.join(frontend_dir, 'node_modules')):
+        if not os.path.exists(node_modules_path):
             logger.warning(f"node_modules not found in {frontend_dir}, skipping TypeScript validation")
-            return []
+            return ["ENVIRONMENT ERROR: TypeScript validation skipped because 'node_modules' is missing. Run 'npm install'."]
         
         try:
             result = subprocess.run(['npx', 'tsc', '--noEmit', '--pretty', 'false'], cwd=frontend_dir, capture_output=True, text=True, timeout=120)
