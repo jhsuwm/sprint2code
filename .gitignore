@@ -1,5 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
+backend/tests/__pycache__/
 *.py[codz]
 *$py.class
 
@@ -265,3 +266,6 @@ service-account*.json
 # Test coverage
 .nyc_output/
 coverage/
+
+# OpenCode
+.opencode/

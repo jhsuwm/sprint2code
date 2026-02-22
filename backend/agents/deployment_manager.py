@@ -256,9 +256,9 @@ class DeploymentManager:
             try:
                 result = subprocess.run(install_cmd, cwd=frontend_dir, capture_output=True, timeout=120, env=npm_env, text=True)
                 if result.returncode != 0:
-                    self.job_manager.log(None, f"⚠️ npm install failed: {result.stderr[:500]}", "npm Warning", level="WARNING")
+                    logger.warning(f"npm install failed: {result.stderr[:500]}")
             except Exception as e:
-                self.job_manager.log(None, f"⚠️ npm install error: {e}", "npm Warning", level="WARNING")
+                logger.warning(f"npm install error: {e}")
         return repo_dir
 
     def _find_tool_path(self, tool: str) -> Optional[str]:
@@ -873,6 +873,33 @@ class DeploymentManager:
                 if idx != -1:
                     importer_rel = "backend/" + full[idx + len(marker):]
             errors.append(f"ImportError in '{importer_rel}': '{symbol}' not found in '{module}'")
+
+        # pip install failures: "ERROR: Invalid requirement: '<bad_line>'"
+        invalid_req = re.search(
+            r"ERROR:\s*Invalid requirement:\s*'([^']+)'",
+            combined
+        )
+        if not invalid_req:
+            # Fallback for pip exceptions that occur during requirement parsing
+            # (e.g. "parsed = _parse_requirement(requirement_string)")
+            # Try to find the line that followed the traceback if possible,
+            # or look for common AI-generated markers in the vicinity of "requirement".
+            if "Traceback" in combined and "packaging/requirements.py" in combined:
+                # If we're here, pip crashed while parsing a requirement.
+                # Inspect combined for obvious bad lines.
+                for line in combined.splitlines():
+                    s = line.strip()
+                    if s.startswith('```') or s.startswith('FILE_PATH:') or re.match(r'^-{3,}$', s):
+                        invalid_req = re.match(r'(.*)', s) # Synthetic match
+                        break
+        
+        if invalid_req:
+            bad_line = invalid_req.group(1)
+            errors.append(
+                f"Invalid pip requirement in 'requirements.txt': "
+                f"'{bad_line}' is not a valid pip package spec - "
+                f"remove this line (it is a code-block marker, not a package)"
+            )
 
         # Frontend runtime build errors can still be fixed by TS pipeline.
         missing_resolve = re.search(r"Module not found:.*Can't resolve ['\"]([^'\"]+)['\"]", combined, re.IGNORECASE)

@@ -205,6 +205,13 @@ class AutoFixWorker:
                                         self._log(job_id, f"📦 Worker {self.worker_id}: Staged refreshed package-lock.json", f"Worker {self.worker_id}")
                                     except Exception:
                                         pass
+                            else:
+                                # CRITICAL: If npm install failed, this package.json is likely broken.
+                                # Capture the failure in file_specific_errors to trigger a retry with AI or rejection.
+                                self._log(job_id, f"❌ Worker {self.worker_id}: Dependency refresh failed for {file_path} - rejecting attempt", f"Worker {self.worker_id}")
+                                file_info['missing'] = [f"Dependency refresh failed: npm install returned non-zero. Check package.json for invalid versions or conflicts."]
+                                self._restore_snapshot(repo_dir, snapshot)
+                                continue
 
                         # Always validate freshly before committing.
                         self._log(job_id, f"🔍 Worker {self.worker_id}: Validating {file_path} (attempt {attempt})...", f"Worker {self.worker_id}")
@@ -233,7 +240,10 @@ class AutoFixWorker:
                         # Keep lightweight observability cache only; not used to skip validation.
                         self._validation_cache[file_path] = (attempt, len(file_specific_errors) > 0)
 
-                        if not file_specific_errors:
+                        is_perfect_fix = not file_specific_errors
+                        is_net_improvement = attempt == max_attempts and len(all_errors) < baseline_error_count
+
+                        if is_perfect_fix or is_net_improvement:
                             # Guardrail: avoid committing changes that increase total static-analysis errors.
                             if len(all_errors) > baseline_error_count:
                                 self._log(
@@ -246,7 +256,10 @@ class AutoFixWorker:
                                 continue
 
                             # SUCCESS - commit
-                            self._log(job_id, f"✅ Worker {self.worker_id}: Validation passed for {file_path} - committing...", f"Worker {self.worker_id}")
+                            if is_perfect_fix:
+                                self._log(job_id, f"✅ Worker {self.worker_id}: Validation passed for {file_path} - committing...", f"Worker {self.worker_id}")
+                            else:
+                                self._log(job_id, f"✅ Worker {self.worker_id}: Partial fix for {file_path} accepted (net improvement: {baseline_error_count}→{len(all_errors)} global errors) - committing...", f"Worker {self.worker_id}")
 
                             if await self.fixer._commit_file_fix(job_id, file_path, fixed_content, github_repo, github_branch):
                                 committed_related = 0
@@ -257,8 +270,13 @@ class AutoFixWorker:
                                         committed_related += 1
                                 if committed_related > 0:
                                     self._log(job_id, f"📦 Worker {self.worker_id}: Committed {committed_related} related file(s)", f"Worker {self.worker_id}")
-                                self._log(job_id, f"✅ Worker {self.worker_id}: Successfully fixed and committed {file_path}", f"Worker {self.worker_id}")
-                                return {'success': True, 'file_path': file_path, 'method': 'ai', 'attempts': attempt}
+                                
+                                if is_perfect_fix:
+                                    self._log(job_id, f"✅ Worker {self.worker_id}: Successfully fixed and committed {file_path}", f"Worker {self.worker_id}")
+                                else:
+                                    self._log(job_id, f"⚠️ Worker {self.worker_id}: Partially fixed and committed {file_path} (some errors remain)", f"Worker {self.worker_id}")
+                                
+                                return {'success': True, 'file_path': file_path, 'method': 'ai', 'attempts': attempt, 'partial': not is_perfect_fix}
 
                             self._log(job_id, f"❌ Worker {self.worker_id}: Commit failed for {file_path}", f"Worker {self.worker_id}")
                             # Commit failed: restore local snapshot to avoid poisoning next tasks.

@@ -16,9 +16,10 @@ class DeploymentValidator:
         dependency_errors = self._validate_frontend_dependencies(repo_dir)
         typescript_errors = self._validate_typescript_types(repo_dir)
         property_errors = self._validate_typescript_properties(repo_dir)
+        concat_errors = self._validate_concatenated_files(repo_dir)
         
         # CRITICAL: Filter out test file errors - they don't affect production deployment
-        all_errors = import_errors + dependency_errors + typescript_errors + property_errors
+        all_errors = import_errors + dependency_errors + typescript_errors + property_errors + concat_errors
         production_errors = [e for e in all_errors if not self._is_test_file_error(e)]
         
         filtered_count = len(all_errors) - len(production_errors)
@@ -49,6 +50,32 @@ class DeploymentValidator:
             'vitest.config'
         ]
         return any(pattern in error for pattern in test_patterns)
+
+    def _validate_concatenated_files(self, repo_dir: str) -> List[str]:
+        """Detect source files that contain AI multi-file output markers like --- and FILE_PATH:"""
+        errors = []
+        for root, dirs, files in os.walk(repo_dir):
+            if any(p in root for p in ["node_modules", "venv", ".git", ".next"]):
+                continue
+            for file in files:
+                if not file.endswith(('.ts', '.tsx', '.js', '.jsx', '.py')):
+                    continue
+                    
+                file_path = os.path.join(root, file)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                        
+                    for i, line in enumerate(lines):
+                        stripped = line.strip()
+                        # Allow normal docstrings/comments but catch AI markers that dictate file paths
+                        if stripped.startswith('FILE_PATH:') or (stripped == '---' and i > 0 and any('FILE_PATH:' in pre_line for pre_line in lines[max(0, i-5):i+5])):
+                            rel_path = os.path.relpath(file_path, repo_dir)
+                            errors.append(f"AI Concatenation Error in '{rel_path}' at line {i+1}: File contains embedded 'FILE_PATH:' or '---' markers and needs to be split.")
+                            break
+                except Exception:
+                    pass
+        return errors
 
     def _validate_typescript_properties(self, repo_dir: str) -> List[str]:
         """
@@ -198,15 +225,25 @@ class DeploymentValidator:
         if not os.path.exists(package_json_path):
             return errors
         
-        all_dependencies = set()
         try:
             with open(package_json_path, 'r') as f:
                 package_data = json.load(f)
                 all_dependencies = set(package_data.get('dependencies', {}).keys()).union(set(package_data.get('devDependencies', {}).keys()))
                 scripts = package_data.get('scripts', {})
                 if 'build' not in scripts: errors.append("Missing script: 'build' in package.json")
-        except Exception:
-            return errors
+        except Exception as e:
+            errors.append(f"Invalid package.json: JSON parsing failed ({e}). Fix the syntax errors.")
+            return errors # Cannot proceed without valid package.json
+        
+        # CRITICAL: If package.json exists, node_modules should be present for validation to be meaningful.
+        node_modules_path = os.path.join(frontend_dir, 'node_modules')
+        if not os.path.exists(node_modules_path) and all_dependencies:
+            errors.append("Missing 'node_modules': Dependencies are defined in package.json but not installed. Run 'npm install'.")
+        elif os.path.exists(node_modules_path) and all_dependencies:
+            # Check for a critical package to ensure it's not an empty node_modules
+            critical_pkg = 'next' if 'next' in all_dependencies else (list(all_dependencies)[0] if all_dependencies else None)
+            if critical_pkg and not os.path.exists(os.path.join(node_modules_path, critical_pkg)):
+                 errors.append(f"Incomplete 'node_modules': Package '{critical_pkg}' not found. Dependency installation may have failed.")
         
         file_map = {}
         ignore_dirs = {'node_modules', '.next', '.git', 'out', 'build', 'dist', 'coverage'}
@@ -367,6 +404,10 @@ class DeploymentValidator:
             # Python keywords that start code statements
             # (from X import Y  /  import X  /  class X  /  def X ...)
             if re.match(r'^(from|import|class|def|return|if|else|elif|for|while|try|except|with|raise|assert|pass)\s', s):
+                return True
+            # Python decorators (e.g., @lru_cache(), @app.route("/"), @dataclass)
+            # Valid pip "@ URL" specs always have a package name BEFORE the @
+            if re.match(r'^@\w+', s):
                 return True
             # Any line containing whitespace that is NOT a pip option (-r, -e, -i, --...)
             # or a URL (contains ://). Valid pip specifiers never have bare spaces.

@@ -1355,6 +1355,22 @@ class DeploymentFixer:
                 )
                 continue
 
+            # NEW: AI Concatenation Error detection (source files that need splitting)
+            concat_match = re.search(r"AI Concatenation Error in '([^']+)'", error)
+            if concat_match:
+                file_path = concat_match.group(1)
+                file_path = self._normalize_file_path(file_path)
+                
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = ''
+                    if os.path.exists(local):
+                        with open(local, 'r') as f:
+                            content = f.read()
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(error)
+                continue
+
             # Invalid pip requirement line (e.g. "---" separator from AI code-block format)
             # Detected by deployment_validator._validate_python_imports
             invalid_pip_match = re.search(
@@ -1781,6 +1797,8 @@ class DeploymentFixer:
         # NEW: Try programmatic fix for files with "from backend.X" errors
         if file_path.endswith('.py') and any('backend.' in err for err in missing_items):
             return True
+        if any("AI Concatenation Error" in err for err in missing_items):
+            return True
         return False
     
     async def _apply_programmatic_fix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
@@ -1795,6 +1813,9 @@ class DeploymentFixer:
                 return await self._create_next_config(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path == 'frontend/tsconfig.json':
                 return await self._create_tsconfig(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # NEW: Programmatic fix for AI Concatenation Errors
+            elif any("AI Concatenation Error" in str(err) for err in file_info.get('missing', [])):
+                return await self._split_concatenated_files(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('.py') and '/models/' in file_path:
                 return await self._fix_backend_model(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('.py') and any('File does not exist - CREATE IT' in str(err) for err in file_info.get('missing', [])):
@@ -1812,6 +1833,88 @@ class DeploymentFixer:
         except Exception as e:
             logger.error(f"Programmatic fix error: {e}")
             return False
+
+    async def _split_concatenated_files(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Split a file containing embedded AI --- / FILE_PATH: markers into separate files."""
+        content = file_info.get('content', '')
+        if not content:
+            local = os.path.join(repo_dir, file_path)
+            if os.path.exists(local):
+                with open(local, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+        if not content:
+            return False
+
+        lines = content.splitlines()
+        segments = []
+        current_path = file_path
+        current_lines = []
+        
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            
+            is_marker = False
+            next_path = None
+            
+            if stripped == '---':
+                if i + 1 < len(lines) and lines[i+1].strip().startswith('FILE_PATH:'):
+                    is_marker = True
+                    next_path = lines[i+1].strip().replace('FILE_PATH:', '').strip()
+                    i += 1
+                elif i + 2 < len(lines) and lines[i+2].strip().startswith('FILE_PATH:'):
+                    is_marker = True
+                    next_path = lines[i+2].strip().replace('FILE_PATH:', '').strip()
+                    i += 2
+            elif stripped.startswith('FILE_PATH:'):
+                is_marker = True
+                next_path = stripped.replace('FILE_PATH:', '').strip()
+                if i + 1 < len(lines) and lines[i+1].strip() == '---':
+                    i += 1
+                elif i + 2 < len(lines) and lines[i+2].strip() == '---':
+                    i += 2
+                    
+            if is_marker and next_path:
+                if current_lines:
+                    segments.append((current_path, '\\n'.join(current_lines)))
+                current_path = self._coerce_generated_path(next_path, file_path)
+                current_lines = []
+            else:
+                current_lines.append(line)
+            i += 1
+            
+        if current_lines:
+             segments.append((current_path, '\\n'.join(current_lines)))
+             
+        if len(segments) <= 1:
+            return False
+            
+        success = True
+        for p, seg_content in segments:
+            # Strip backticks
+            if seg_content.strip().startswith('```'):
+                parts = seg_content.split('\\n')
+                if len(parts) > 1 and parts[0].strip().startswith('```'):
+                    seg_content = '\\n'.join(parts[1:])
+            if seg_content.strip().endswith('```'):
+                parts = seg_content.split('\\n')
+                if len(parts) > 1 and parts[-1].strip() == '```':
+                    seg_content = '\\n'.join(parts[:-1])
+                    
+            local_p = os.path.join(repo_dir, p)
+            os.makedirs(os.path.dirname(local_p), exist_ok=True)
+            with open(local_p, 'w', encoding='utf-8') as f:
+                f.write(seg_content)
+                
+            cmt = await self._commit_programmatic_fix(job_id, p, seg_content, github_repo, github_branch)
+            if not cmt:
+                success = False
+                
+        if success:
+            self._safe_log(job_id, f"🧹 Orchestrator: Split concatenated file into {len(segments)} files", "Programmatic Fix")
+        return success
     
     async def _fix_requirements(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add missing packages and strip any pip-incompatible separator lines."""
@@ -1837,9 +1940,19 @@ class DeploymentFixer:
             # Pure separator lines: ---, ===, etc.
             if re.match(r'^-{3,}$', s) or re.match(r'^={3,}$', s):
                 return True
-            # Python keywords that start code statements
-            # (from X import Y  /  import X  /  class X  /  def X ...)
-            if re.match(r'^(from|import|class|def|return|if|else|elif|for|while|try|except|with|raise|assert|pass)\s', s):
+            # Python keywords that start code statements (full line match or space-prefixed)
+            patterns = [
+                r'^(from|import|class|def|return|if|else|elif|for|while|try|except|with|raise|assert|pass)\b',
+                r'^print\(',
+                r'^#.*(FILE_PATH|```)', # Comments about markers
+            ]
+            if any(re.search(p, s) for p in patterns):
+                return True
+            # Python decorators
+            if re.match(r'^@\w+', s):
+                return True
+            # Bare strings within ``` blocks often leak out
+            if s in ('python', 'bash', 'yaml', 'json', 'typescript', 'javascript', 'txt'):
                 return True
             # Any line containing whitespace that is NOT a pip option (-r, -e, -i, --...)
             # or a URL (contains ://). Valid pip specifiers never have bare spaces.
