@@ -1389,7 +1389,6 @@ class DeploymentFixer:
                     f"Strip invalid pip line: '{invalid_pip_match.group(1)}'"
                 )
                 continue
-
             # Missing dependency
             if "Missing dependency:" in error:
                 pkg_match = re.search(r"Missing dependency: '([^']+)'", error)
@@ -1408,7 +1407,33 @@ class DeploymentFixer:
                         files[file_path] = {'missing': [], 'content': content, 'packages': set()}
                     files[file_path]['packages'].add(pkg)
             
-            # ImportError - CRITICAL: Fix BOTH the dependency file AND the importer
+            # NEW: package.json syntax errors (e.g. Extra data, Expecting value)
+            json_syntax_match = re.search(r"Invalid package\.json: JSON parsing failed \(([^)]+)\)", error)
+            if json_syntax_match:
+                details = json_syntax_match.group(1)
+                file_path = "frontend/package.json"
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = ''
+                    if os.path.exists(local):
+                        with open(local, 'r') as f:
+                            content = f.read()
+                    files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                files[file_path]['missing'].append(f"Fix JSON syntax: {details}")
+                continue
+
+            # NEW: Missing node_modules bootstrapping
+            if "Missing 'node_modules'" in error:
+                file_path = "frontend/package.json"
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = ''
+                    if os.path.exists(local):
+                        with open(local, 'r') as f:
+                            content = f.read()
+                    files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                files[file_path]['missing'].append("Missing 'node_modules': Forces fresh dependency installation.")
+                continue
             match = re.search(r"ImportError in '([^']+)': '([^']+)' not found in '([^']+)'", error)
             if match:
                 importer_path = match.group(1)
@@ -1914,6 +1939,22 @@ class DeploymentFixer:
                 
         if success:
             self._safe_log(job_id, f"🧹 Orchestrator: Split concatenated file into {len(segments)} files", "Programmatic Fix")
+            
+            # Additional cleanup for package.json segments that might have leaked AI commentary
+            for p, _ in segments:
+                if p.endswith('package.json'):
+                    local_p = os.path.join(repo_dir, p)
+                    if os.path.exists(local_p):
+                        with open(local_p, 'r', encoding='utf-8') as f:
+                            p_content = f.read()
+                        p_data = self._resilient_json_parse(p_content)
+                        if p_data:
+                            cleaned_json = json.dumps(p_data, indent=2)
+                            if cleaned_json.strip() != p_content.strip():
+                                with open(local_p, 'w', encoding='utf-8') as f:
+                                    f.write(cleaned_json)
+                                await self._commit_programmatic_fix(job_id, p, cleaned_json, github_repo, github_branch)
+                                self._safe_log(job_id, f"🧹 Post-split cleanup: Resiliently fixed JSON in {p}", "Programmatic Fix")
         return success
     
     async def _fix_requirements(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
@@ -2097,19 +2138,32 @@ class DeploymentFixer:
         return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
     
     async def _fix_package_json(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
-        """Add missing packages and regenerate package-lock.json"""
-        packages = file_info.get('packages', set())
-        if not packages:
-            return False
-        
+        """Add missing packages and resiliently fix syntax errors"""
         local = os.path.join(repo_dir, file_path)
-        original_content = file_info.get('content', '{}')
-        data = json.loads(original_content)
+        original_content = file_info.get('content', '') or '{}'
         
+        # Resiliently parse JSON to handle "Extra data" or leading/trailing noise
+        data = self._resilient_json_parse(original_content)
+        if data is None:
+            self._safe_log(job_id, f"❌ Failed to resiliently parse {file_path}", "JSON Fix")
+            return False
+            
+        packages = file_info.get('packages', set())
         deps = data.get('dependencies', {})
         dev_deps = data.get('devDependencies', {})
         
         modified = False
+        
+        # BOOTSTRAPPING: If node_modules is missing, we must return True to trigger a refresh
+        # even if package.json content hasn't changed.
+        if any("Missing 'node_modules'" in str(m) for m in file_info.get('missing', [])):
+            modified = True
+            self._safe_log(job_id, f"🚀 Refreshing dependencies to resolve missing node_modules in {file_path}", "JSON Fix")
+        
+        # If we had to strip extra data, consider it modified even if no packages added
+        if original_content.strip() != json.dumps(data, indent=2).strip() and not packages:
+            modified = True
+            self._safe_log(job_id, f"🧹 Cleaned up malformed JSON in {file_path}", "JSON Fix")
         
         # Well-known packages that should be added
         known_packages = {
@@ -2485,3 +2539,45 @@ class DeploymentFixer:
                 {"type": "paragraph", "content": [{"type": "text", "text": f"Error: {error_output[:1000]}"}]}
             ]
         }
+
+    def _resilient_json_parse(self, content: str) -> Optional[dict]:
+        """
+        Attempt to parse JSON even if it has leading/trailing noise or multiple blocks.
+        Extracts the FIRST valid-looking JSON object or array.
+        """
+        content = content.strip()
+        if not content:
+            return None
+            
+        # Try direct parse first
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            pass
+            
+        # Try all possible '{' start positions
+        start_pos = 0
+        while True:
+            start_idx = content.find('{', start_pos)
+            if start_idx == -1:
+                break
+                
+            # Attempt to find the matching brace for THIS start position
+            bracket_count = 0
+            for i in range(start_idx, len(content)):
+                if content[i] == '{':
+                    bracket_count += 1
+                elif content[i] == '}':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        try:
+                            potential_json = content[start_idx:i+1]
+                            return json.loads(potential_json)
+                        except json.JSONDecodeError:
+                            # Not valid JSON, keep looking for a later closing brace for THIS start
+                            continue
+            
+            # If no valid JSON found starting at start_idx, try the next '{'
+            start_pos = start_idx + 1
+            
+        return None
