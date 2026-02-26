@@ -196,16 +196,20 @@ class CodeExecutionManager:
         Respond with ONLY the category name (frontend, backend, or fullstack).
         """
         try:
-            # Use Gemini to categorize via the existing service's retry logic
-            # Use self.gemini_service.client.models.generate_content (the method) NOT as an attribute access on a call
-            response = await self.gemini_service._call_with_retry(
-                'models.generate_content', # Pass as string to avoid split error in _call_with_retry
-                model=self.gemini_service.model_name, # Use model_name string
-                contents=prompt,
-                config={'temperature': 0.1}
+            # Use the vendor-agnostic generate_code API (works with OpenRouter, Gemini, etc.)
+            # self.gemini_service is an AIService instance that routes to the configured AI_VENDOR.
+            result = await self.gemini_service.generate_code(
+                task_description=prompt,
+                context="",
+                story_context="",
+                attachments=None,
+                temperature=0.1,
+                timeout=30.0,
+                max_output_tokens=20,
             )
-            category = response.text.strip().lower()
-            # Clean up potential extra output
+            code = result[0] if isinstance(result, tuple) else result
+            category = (code or "").strip().lower()
+            # Extract the first matching category keyword from the response
             for possible in ["frontend", "backend", "fullstack"]:
                 if possible in category:
                     return possible
