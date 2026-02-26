@@ -214,14 +214,26 @@ class AutoFixWorker:
                         if is_perfect_fix or is_net_improvement:
                             # Guardrail: avoid committing changes that increase total static-analysis errors.
                             if len(all_errors) > baseline_error_count:
-                                self._log(
-                                    job_id,
-                                    f"⚠️ Worker {self.worker_id}: Rejecting {file_path} attempt {attempt} due to global regression ({baseline_error_count}→{len(all_errors)} errors)",
-                                    f"Worker {self.worker_id}"
-                                )
-                                file_info['missing'] = [f"Global regression: {baseline_error_count}->{len(all_errors)} errors"]
-                                self._restore_snapshot(repo_dir, snapshot)
-                                continue
+                                if attempt < max_attempts:
+                                    self._log(
+                                        job_id,
+                                        f"🔄 Worker {self.worker_id}: DETECTED GLOBAL REGRESSION ({baseline_error_count}→{len(all_errors)} errors). Attempting self-correction...",
+                                        f"Worker {self.worker_id}"
+                                    )
+                                    # Include the regression errors in the NEXT prompt to help AI reconcile
+                                    regression_details = [f"REGRESSION ERROR: {e}" for e in all_errors[:10]]
+                                    file_info['missing'] = [f"Self-Correction: Previous attempt caused global regression ({baseline_error_count} to {len(all_errors)} errors). FIX THESE SIDE-EFFECTS TOO:"] + regression_details
+                                    self._restore_snapshot(repo_dir, snapshot)
+                                    continue
+                                else:
+                                    self._log(
+                                        job_id,
+                                        f"⚠️ Worker {self.worker_id}: Rejecting {file_path} attempt {attempt} due to persistent global regression ({baseline_error_count}→{len(all_errors)} errors)",
+                                        f"Worker {self.worker_id}"
+                                    )
+                                    file_info['missing'] = [f"Global regression: {baseline_error_count}->{len(all_errors)} errors"]
+                                    self._restore_snapshot(repo_dir, snapshot)
+                                    continue
 
                             # SUCCESS - commit
                             if is_perfect_fix:

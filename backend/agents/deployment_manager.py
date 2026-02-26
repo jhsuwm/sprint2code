@@ -13,6 +13,7 @@ from database.firestore_config import get_firestore_client
 from agents.deployment_validator import DeploymentValidator
 from agents.deployment_fixer import DeploymentFixer
 from agents.auto_fix_orchestrator import AutoFixOrchestrator
+from agents.skill_registry import SkillRegistry
 
 class DeploymentManager:
     def __init__(self, job_manager, local_app_service, github_service, gemini_service, jira_service):
@@ -24,6 +25,7 @@ class DeploymentManager:
         
         self.validator = DeploymentValidator()
         self.fixer = DeploymentFixer(job_manager, gemini_service, github_service, jira_service)
+        self.skill_registry = SkillRegistry()
         
         # Parallel auto-fix orchestrator with 2 workers
         num_workers = int(os.getenv('AUTO_FIX_WORKERS', '2'))
@@ -51,7 +53,8 @@ class DeploymentManager:
             # 1. Determine company name from YAML config or fallback
             job_data = job_store.get(job_id, {})
             config_name = job_data.get("config_name")
-            company_name = self._determine_company_name(job_id, config_name, project_key, epic_key)
+            skill_names = job_data.get("skill_names", [])
+            company_name = self._determine_company_name(job_id, config_name, skill_names, project_key, epic_key)
             
             # 2. GitHub setup
             github_repo = job_data.get("github_repo")
@@ -71,8 +74,14 @@ class DeploymentManager:
             modified_repos = job_data.get("modified_repos", [])
             all_repos_info = job_data.get("all_repos", [])
             
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # MULTI-REPO SUPPORT: Clone all modified repositories into appropriate subdirectories
+            # MULTI-REPO SUPPORT: Clone all modified repositories into appropriate subdirectories
+            # Create a persistent deployment directory for the lifetime of the job
+            deployments_root = os.path.join(os.getcwd(), 'deployments')
+            os.makedirs(deployments_root, exist_ok=True)
+            temp_dir = os.path.join(deployments_root, job_id)
+            os.makedirs(temp_dir, exist_ok=True)
+
+            try:
                 if len(modified_repos) > 1:
                     self.job_manager.log(job_id, f"Preparing multi-repo deployment for: {', '.join(modified_repos)}", "Deployment")
                     repo_dir = temp_dir # Build context is the parent directory
@@ -165,6 +174,10 @@ class DeploymentManager:
 
                 await self._handle_startup_failure(job_id, story_id, story_key, startup_failure_message)
                 return
+            except Exception as e:
+                # Ensure we log the exception if it happens inside the try block
+                logger.error(f"Error during deployment execution: {e}")
+                raise e
 
         except asyncio.TimeoutError:
             self.job_manager.log(job_id, "❌ Local startup timed out after 10 minutes.", "Startup Failed", level="ERROR")
@@ -174,8 +187,19 @@ class DeploymentManager:
             self.job_manager.log(job_id, f"Local deployment failed: {e}", "Deployment Failed", level="ERROR")
             job_store[job_id]["app_status"] = "FAILED"
 
-    def _determine_company_name(self, job_id, config_name, project_key, epic_key):
+    def _determine_company_name(self, job_id, config_name, skill_names, project_key, epic_key):
         company_name = None
+        for skill_name in skill_names or []:
+            skill = self.skill_registry.load_skill(skill_name)
+            if not skill:
+                continue
+            # Optional frontmatter field in SKILL.md.
+            content = skill.get("content", "")
+            match = re.search(r"(?im)^company_name:\s*['\"]?([a-zA-Z0-9 _-]+)['\"]?$", content)
+            if match:
+                company_name = "".join(c for c in match.group(1) if c.isalnum()).lower()
+                break
+
         if config_name:
             content = self._fetch_config_from_firestore(config_name)
             if content:
@@ -248,7 +272,7 @@ class DeploymentManager:
                 self.job_manager.log(None, "⚠️ npm not found, skipping frontend dependency installation", "Tool Warning", level="WARNING")
                 return repo_dir
             
-            install_cmd = [npm_path, 'ci', '--prefer-offline', '--no-audit'] if os.path.exists(os.path.join(frontend_dir, "package-lock.json")) else [npm_path, 'install', '--prefer-offline', '--no-audit']
+            install_cmd = [npm_path, 'install', '--prefer-offline', '--no-audit']
             
             npm_env = os.environ.copy()
             npm_env['PATH'] = '/usr/local/bin:/usr/bin:/bin:' + npm_env.get('PATH', '')
@@ -442,7 +466,11 @@ class DeploymentManager:
                 self.job_manager.log(job_id, "Errors changed - attempting to fix new/different issues", "Auto-Fix Progress")
             
             # Track if we achieved a new best (lowest error count)
-            if new_error_count < lowest_error_count:
+            # CRITICAL: Only update 'best' state if the validation result is CLEAN of environmental failures.
+            # Environmental failures (like missing node_modules) artificially lower the error count.
+            has_env_error = any("ENVIRONMENT ERROR" in err for err in all_errors)
+            
+            if new_error_count < lowest_error_count and not has_env_error:
                 lowest_error_count = new_error_count
                 last_significant_progress_cycle = attempt
                 cycles_without_best_improvement = 0
@@ -806,11 +834,31 @@ class DeploymentManager:
         self.job_manager.log(job_id, "✅ App started successfully on local machine", "Startup Complete")
         backend_url = urls.get('backend_url', 'http://localhost:8100')
         frontend_url = urls.get('frontend_url', 'http://localhost:3100')
+        
+        # EXPLICIT LOGGING FOR USER VISIBILITY
+        self.job_manager.log(job_id, f"🚀 AI-generated frontend is running at: {frontend_url}", "App URL")
+        self.job_manager.log(job_id, f"📡 Backend API is running at: {backend_url}", "API URL")
+        
         job_store[job_id].update({
             "backend_url": backend_url,
             "frontend_url": frontend_url,
             "app_status": "RUNNING_LOCALLY"
         })
+
+        # FETCH INITIAL LOGS FOR UI CONTAINERS
+        # This ensures the "Frontend Log" and "Backend Log" boxes in the UI are not empty on start
+        try:
+            backend_logs = await self.local_app_service.get_app_logs('backend', limit=5000)
+            frontend_logs = await self.local_app_service.get_app_logs('frontend', limit=5000)
+            
+            if backend_logs: 
+                job_store[job_id]["backend_logs"] = backend_logs
+                self.job_manager.log(job_id, f"Captured {len(backend_logs)} lines of backend startup logs", "Logs")
+            if frontend_logs: 
+                job_store[job_id]["frontend_logs"] = frontend_logs
+                self.job_manager.log(job_id, f"Captured {len(frontend_logs)} lines of frontend startup logs", "Logs")
+        except Exception as e:
+            logger.error(f"Failed to fetch initial logs: {e}")
         
         # Check health
         backend_healthy, frontend_healthy = await self.local_app_service.check_health(job_id)
@@ -831,8 +879,8 @@ class DeploymentManager:
         job_store[job_id].update({"app_status": "STARTUP_FAILED", "startup_error": error_output[:5000]})
         
         # Get logs from processes
-        backend_logs = await self.local_app_service.get_app_logs('backend', limit=100)
-        frontend_logs = await self.local_app_service.get_app_logs('frontend', limit=100)
+        backend_logs = await self.local_app_service.get_app_logs('backend', limit=5000)
+        frontend_logs = await self.local_app_service.get_app_logs('frontend', limit=5000)
         
         if backend_logs: job_store[job_id]["backend_logs"] = backend_logs
         if frontend_logs: job_store[job_id]["frontend_logs"] = frontend_logs

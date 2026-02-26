@@ -1,30 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, HTTPException, Header
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from services.jira_service import JiraService
 from agents.autonomous_dev_agent import AutonomousDevAgent
-from database.firestore_config import get_firestore_client
+from agents.skill_registry import SkillRegistry
 from log_config import logger
-from auth.jwt_utils import verify_token
-from datetime import datetime
 
 router = APIRouter()
 jira_service = JiraService()
 agent = AutonomousDevAgent()
+skill_registry = SkillRegistry()
 
 class GenerateRequest(BaseModel):
     story_id: str
-    config_name: Optional[str] = None # Legacy/Grouped
-    frontend_config_name: Optional[str] = None
-    backend_config_name: Optional[str] = None
-
-class ConfigRequest(BaseModel):
-    name: str
-    type: Optional[str] = "grouped" # "frontend", "backend", or "grouped"
-    content: str
-    # Fields for grouped config (backward compatibility or combined approach)
-    frontend_content: Optional[str] = None
-    backend_content: Optional[str] = None
+    skill_names: Optional[List[str]] = None
 
 from fastapi import UploadFile, File, Form
 
@@ -56,79 +45,20 @@ async def get_jira_structure(authorization: str = Header(...)):
         logger.error(f"Error getting JIRA structure: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-import os
-from pathlib import Path
-
-@router.get("/local-configs")
-async def get_local_configs(authorization: str = Header(...)):
+@router.get("/local-skills")
+async def get_local_skills(authorization: str = Header(...)):
     """
-    List all YAML config files from the local config folder.
+    List local SKILL.md files from skills/.
     """
     try:
         await get_user_from_header(authorization)
-        
-        # Get the config folder path (relative to backend root)
-        config_dir = Path(__file__).parent.parent.parent / "config"
-        
-        if not config_dir.exists():
-            logger.warning(f"Config directory not found: {config_dir}")
-            return []
-        
-        # List all .yaml and .yml files
-        config_files = []
-        for file_path in config_dir.glob("*.yaml"):
-            config_files.append({
-                "name": file_path.name,
-                "path": str(file_path.relative_to(config_dir.parent))
-            })
-        for file_path in config_dir.glob("*.yml"):
-            config_files.append({
-                "name": file_path.name,
-                "path": str(file_path.relative_to(config_dir.parent))
-            })
-        
-        logger.info(f"Found {len(config_files)} local config files")
-        return config_files
-        
+        skills = skill_registry.list_local_skills()
+        logger.info(f"Found {len(skills)} local skills")
+        return skills
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error listing local configs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/local-config/{filename}")
-async def get_local_config(filename: str, authorization: str = Header(...)):
-    """
-    Read a specific config file from the local config folder.
-    """
-    try:
-        await get_user_from_header(authorization)
-        
-        # Get the config folder path
-        config_dir = Path(__file__).parent.parent.parent / "config"
-        config_file = config_dir / filename
-        
-        # Security check - ensure the file is within the config directory
-        if not str(config_file.resolve()).startswith(str(config_dir.resolve())):
-            raise HTTPException(status_code=403, detail="Access denied")
-        
-        if not config_file.exists():
-            raise HTTPException(status_code=404, detail=f"Config file '{filename}' not found")
-        
-        # Read the file content
-        with open(config_file, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        logger.info(f"Read local config file: {filename}")
-        return {
-            "name": filename,
-            "content": content
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error reading local config: {e}")
+        logger.error(f"Error listing local skills: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/stories")
@@ -155,13 +85,14 @@ async def start_generation(request: GenerateRequest, authorization: str = Header
     try:
         user_payload = await get_user_from_header(authorization)
         email = user_payload.get("email")
-        logger.info(f"Starting generation for user: {email}, story: {request.story_id}, config: {request.config_name}, frontend_config: {request.frontend_config_name}, backend_config: {request.backend_config_name}")
+        logger.info(
+            f"Starting generation for user: {email}, story: {request.story_id}, "
+            f"skills: {request.skill_names}"
+        )
         job_id = await agent.start_job(
-            request.story_id, 
-            email, 
-            request.config_name,
-            frontend_config_name=request.frontend_config_name,
-            backend_config_name=request.backend_config_name
+            request.story_id,
+            email,
+            skill_names=request.skill_names or []
         )
         return {"job_id": job_id, "status": "RUNNING"}
     except HTTPException:
@@ -193,148 +124,6 @@ async def get_progress(job_id: str, authorization: str = Header(...)):
         raise
     except Exception as e:
         logger.error(f"Error getting progress: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/config")
-async def save_config(config: ConfigRequest, authorization: str = Header(...)):
-    """
-    Save a YAML technical configuration to Firestore.
-    """
-    try:
-        user_payload = await get_user_from_header(authorization)
-        email = user_payload.get("email")
-        
-        # Get Firestore client
-        db = get_firestore_client()
-        if not db:
-            raise HTTPException(status_code=503, detail="Firestore unavailable")
-        
-        # Create config document
-        config_data = {
-            "name": config.name,
-            "type": config.type,
-            "content": config.content,
-            "frontend_content": config.frontend_content,
-            "backend_content": config.backend_content,
-            "created_by": email,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat()
-        }
-        
-        # Use name as document ID directly as requested by user
-        doc_id = config.name
-        
-        # Save to Firestore
-        doc_ref = db.collection("autonomous_dev_configs").document(doc_id)
-        doc_ref.set(config_data)
-        
-        logger.info(f"Config '{config.name}' saved by user: {email}")
-        return {"message": "Config saved successfully", "name": config.name}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error saving config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/config/{config_name}")
-async def get_config(config_name: str, authorization: str = Header(...)):
-    """
-    Retrieve a YAML technical configuration from Firestore.
-    """
-    try:
-        await get_user_from_header(authorization)
-        
-        # Get Firestore client
-        db = get_firestore_client()
-        if not db:
-            raise HTTPException(status_code=503, detail="Firestore unavailable")
-        
-        # Fetch config from Firestore
-        doc_ref = db.collection("autonomous_dev_configs").document(config_name)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-            raise HTTPException(status_code=404, detail=f"Config '{config_name}' not found")
-        
-        config_data = doc.to_dict()
-        logger.info(f"Config '{config_name}' retrieved")
-        return config_data
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error retrieving config: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/configs")
-async def list_configs(authorization: str = Header(...)):
-    """
-    List all available YAML technical configurations.
-    """
-    try:
-        await get_user_from_header(authorization)
-        
-        # Get Firestore client
-        db = get_firestore_client()
-        if not db:
-            raise HTTPException(status_code=503, detail="Firestore unavailable")
-        
-        # Fetch all configs
-        configs_ref = db.collection("autonomous_dev_configs")
-        docs = configs_ref.stream()
-        
-        configs = []
-        for doc in docs:
-            config_data = doc.to_dict()
-            configs.append({
-                "name": config_data.get("name"),
-                "type": config_data.get("type", "grouped"),
-                "created_by": config_data.get("created_by"),
-                "created_at": config_data.get("created_at"),
-                "updated_at": config_data.get("updated_at")
-            })
-        
-        logger.info(f"Listed {len(configs)} configs")
-        return configs
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error listing configs: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.delete("/config/{config_name}")
-async def delete_config(config_name: str, authorization: str = Header(...)):
-    """
-    Delete a YAML technical configuration from Firestore.
-    """
-    try:
-        await get_user_from_header(authorization)
-        
-        # Get Firestore client
-        db = get_firestore_client()
-        if not db:
-            raise HTTPException(status_code=503, detail="Firestore unavailable")
-        
-        # Configs are stored by name or type_name
-        # We try both if the passed name doesn't exist
-        doc_ref = db.collection("autonomous_dev_configs").document(config_name)
-        doc = doc_ref.get()
-        
-        if not doc.exists:
-            # Maybe it's frontend_name or backend_name
-            # But the UI usually passes the doc_id if it's listing them
-            raise HTTPException(status_code=404, detail=f"Config '{config_name}' not found")
-            
-        doc_ref.delete()
-        logger.info(f"Config '{config_name}' deleted")
-        return {"message": "Config deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error deleting config: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/generate-prd")

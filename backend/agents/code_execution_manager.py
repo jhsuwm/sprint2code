@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Dict, Any, List, Optional
 from log_config import logger, error
 from agents.job_manager import job_store
@@ -234,44 +235,37 @@ class CodeExecutionManager:
             return config_str
 
     def _determine_github_repo(self, job_id: str, technical_config: Any, task_type: str) -> Optional[str]:
+        """Determine the correct GitHub repository for the given task type.
+
+        Uses the ``all_repos`` list that was populated during the planning phase by
+        ``RequirementsManager._identify_all_repos``.  Repos are keyed by ``type``
+        (``"backend"``, ``"frontend"``, or ``"full"``), so we first try an exact
+        type match then fall back to the primary default repo stored in the job.
+
+        This replaces the previous approach of re-parsing the technical config with
+        ``yaml.safe_load``, which failed on SKILL.md content (YAML frontmatter
+        creates a multi-document stream that ``safe_load`` rejects).
         """
-        Determine the correct GitHub repository for the given task type.
-        """
-        import yaml
-        
-        # Default repo from job store (primary repo)
-        default_repo = job_store[job_id].get("github_repo")
-        
-        if not isinstance(technical_config, dict):
-            return default_repo
-            
-        repo_url = None
-        if task_type == "frontend" and technical_config.get("frontend"):
-            try:
-                cfg = yaml.safe_load(technical_config["frontend"])
-                repo_url = cfg.get("github_repository") or cfg.get("github_url")
-                if repo_url:
-                    logger.info(f"Determined frontend repo from config: {repo_url}")
-            except Exception as e:
-                logger.warning(f"Failed to parse frontend config for repo extraction: {e}")
-        elif task_type == "backend" and technical_config.get("backend"):
-            try:
-                cfg = yaml.safe_load(technical_config["backend"])
-                repo_url = cfg.get("github_repository") or cfg.get("github_url")
-                if repo_url:
-                    logger.info(f"Determined backend repo from config: {repo_url}")
-            except Exception as e:
-                logger.warning(f"Failed to parse backend config for repo extraction: {e}")
-            
-        if repo_url:
-            repo_info = self.github_service.extract_github_repo_from_description(f"Github: {repo_url}")
-            if repo_info:
-                repo_str = f"{repo_info['owner']}/{repo_info['repo']}"
+        # Primary: typed repos identified during planning (sourced from SKILL.md frontmatter)
+        all_repos = job_store[job_id].get("all_repos", [])
+        if all_repos:
+            matching = next((r for r in all_repos if r.get("type") == task_type), None)
+            if matching:
+                repo_str = f"{matching['owner']}/{matching['repo']}"
+                logger.info(f"Determined {task_type} repo from job store: {repo_str}")
                 return repo_str
-                
+
+        # Fallback: primary / default repo
+        default_repo = job_store[job_id].get("github_repo")
         if default_repo:
             logger.info(f"Using default repository for {task_type} task: {default_repo}")
         return default_repo
+
+    def _extract_repo_url_from_text(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        match = re.search(r"https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", text)
+        return match.group(0) if match else None
 
     async def create_pull_request(self, job_id, story_key, summary):
         modified_repos = job_store[job_id].get("modified_repos", [])

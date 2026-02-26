@@ -679,13 +679,29 @@ class DeploymentFixer:
         
         return [False] * len(batch)
     
+    @staticmethod
+    def _strip_skill_frontmatter(content: str) -> str:
+        """Strip YAML frontmatter from SKILL.md content.
+
+        Per the agent skills spec, the frontmatter block (between ``---`` delimiters)
+        is machine-parseable metadata (name, type, github_repository, …) and should
+        NOT be sent to the AI as instructional context.  Only the Markdown body that
+        follows the closing ``---`` is human-readable skill guidance intended for AI.
+        """
+        return re.sub(r"^\s*---\s*\n.*?\n---\s*\n?", "", content, flags=re.DOTALL).strip()
+
     def _load_yaml_context(self, job_id: str, repo_dir: str, file_path: str = None) -> str:
-        """Load YAML config context from job store - only relevant config based on file path"""
+        """Load technical context (skills/config) from job store - scoped by file type.
+
+        Only the human-readable *body* of each SKILL.md is forwarded to the AI.
+        The YAML frontmatter (name, type, github_repository, …) is metadata for the
+        runtime and must be stripped before the content reaches the AI model.
+        """
         try:
             context = ""
             job_data = job_store.get(job_id, {})
             
-            # Get technical_config dict which contains frontend/backend configs
+            # Get technical_config dict which contains frontend/backend skill/config context.
             technical_config = job_data.get("technical_config", {})
             
             # Determine if this is a frontend or backend file
@@ -704,24 +720,29 @@ class DeploymentFixer:
                 is_frontend = True
                 is_backend = True
             
-            # Load ONLY relevant config to reduce context size
+            # Load ONLY relevant skill body to reduce context size.
+            # Strip YAML frontmatter — it is machine-readable metadata, not AI instructions.
             if is_frontend:
-                frontend_config = technical_config.get("frontend", "")
-                if frontend_config:
-                    context += "=== FRONTEND TECHNICAL REQUIREMENTS ===\n"
-                    context += frontend_config[:4000]  # Increased from 3000 since we're only including one
-                    context += "\n\n"
+                frontend_raw = technical_config.get("frontend", "")
+                if frontend_raw:
+                    frontend_body = self._strip_skill_frontmatter(frontend_raw)
+                    if frontend_body:
+                        context += "=== FRONTEND SKILL REQUIREMENTS ===\n"
+                        context += frontend_body[:4000]
+                        context += "\n\n"
             
             if is_backend:
-                backend_config = technical_config.get("backend", "")
-                if backend_config:
-                    context += "=== BACKEND TECHNICAL REQUIREMENTS ===\n"
-                    context += backend_config[:4000]  # Increased from 3000 since we're only including one
-                    context += "\n\n"
+                backend_raw = technical_config.get("backend", "")
+                if backend_raw:
+                    backend_body = self._strip_skill_frontmatter(backend_raw)
+                    if backend_body:
+                        context += "=== BACKEND SKILL REQUIREMENTS ===\n"
+                        context += backend_body[:4000]
+                        context += "\n\n"
             
             return context
         except Exception as e:
-            logger.warning(f"Failed to load YAML context: {e}")
+            logger.warning(f"Failed to load technical context: {e}")
             return ""
     
     def _load_story_context(self, job_id: str) -> str:
@@ -1150,10 +1171,10 @@ class DeploymentFixer:
         prompt += "PARTIAL FIXES ARE FAILURES - changing errors without eliminating them causes deployment to fail.\n"
         prompt += "If you can't fix ALL errors completely, say so explicitly.\n\n"
         
-        # CRITICAL: Add YAML config context FIRST with strong emphasis
+        # CRITICAL: Add technical skill/config context FIRST with strong emphasis
         prompt += "🚨 MANDATORY TECHNICAL REQUIREMENTS 🚨\n"
         prompt += "="*80 + "\n"
-        prompt += "You MUST follow the technical requirements specified in the config files below.\n"
+        prompt += "You MUST follow the technical requirements specified in the skill/config context below.\n"
         prompt += "DO NOT use libraries, frameworks, or approaches that are NOT specified.\n"
         prompt += "DO NOT hallucinate or assume technologies - USE ONLY what's defined below.\n"
         prompt += "="*80 + "\n\n"
@@ -1200,17 +1221,17 @@ class DeploymentFixer:
         
         # Add context FIRST with DEBUG logging
         if yaml_context:
-            # DEBUG: Log that we're sending config
-            config_type = "FRONTEND" if "FRONTEND TECHNICAL" in yaml_context else "BACKEND" if "BACKEND TECHNICAL" in yaml_context else "UNKNOWN"
+            # DEBUG: Log that we're sending context
+            config_type = "FRONTEND" if ("FRONTEND TECHNICAL" in yaml_context or "FRONTEND SKILL" in yaml_context) else "BACKEND" if ("BACKEND TECHNICAL" in yaml_context or "BACKEND SKILL" in yaml_context) else "UNKNOWN"
             config_length = len(yaml_context)
-            logger.info(f"🔍 DEBUG: Sending {config_type} tech config to AI ({config_length} chars) for {file_path}")
+            logger.info(f"🔍 DEBUG: Sending {config_type} technical context to AI ({config_length} chars) for {file_path}")
             # Log first 200 chars as preview
             preview = yaml_context[:200].replace('\n', ' ')
             logger.info(f"   Config Preview: {preview}...")
             prompt += yaml_context
         else:
             # WARNING: No config sent
-            logger.warning(f"⚠️ WARNING: NO technical config sent to AI for {file_path}")
+            logger.warning(f"⚠️ WARNING: NO technical context sent to AI for {file_path}")
         
         if story_context:
             prompt += story_context + "\n"
@@ -1321,7 +1342,13 @@ class DeploymentFixer:
         prompt += "- Code compiles without any errors\n"
         prompt += "- All imports resolve to real packages/files\n"
         prompt += "- All exports exist for dependent files\n\n"
-        
+
+        # NEW: Check for redundant type definitions and warn AI
+        if repo_dir:
+            redundant_context = self._get_redundant_type_context(repo_dir, file_path, info)
+            if redundant_context:
+                prompt += redundant_context
+
         prompt += "Output format:\n"
         prompt += "ROOT_CAUSE: <Why these errors exist - the fundamental problem>\n"
         prompt += "COMPLETE_FIX: <Exact changes that will eliminate ALL errors listed above>\n"
@@ -1422,6 +1449,23 @@ class DeploymentFixer:
                 files[file_path]['missing'].append(f"Fix JSON syntax: {details}")
                 continue
 
+            # NEW: Missing mandatory frontend directory (app/ or pages/)
+            dir_match = re.search(r"(?:ENVIRONMENT ERROR: )?Missing mandatory directory: Frontend must have either an 'app' directory \(App Router\) or 'pages' directory \(Pages Router\)", error)
+            if dir_match:
+                # Target the most common entry point to force creation of the directory
+                file_path = "frontend/app/page.tsx"
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = ''
+                    if os.path.exists(local):
+                        with open(local, 'r') as f:
+                            content = f.read()
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(
+                    "Missing mandatory routing directory (app/ or pages/). CREATE 'frontend/app/page.tsx' with a basic Next.js page component to establish the App Router."
+                )
+                continue
+
             # NEW: Missing node_modules bootstrapping
             if "Missing 'node_modules'" in error:
                 file_path = "frontend/package.json"
@@ -1440,10 +1484,11 @@ class DeploymentFixer:
                 missing_name = match.group(2)
                 target_module = match.group(3)
                 
-                # Fix: Strip .py from the importer before path conversion
+                # CRITICAL: Do NOT strip .py from importer_path before calling _resolve_import_path.
+                # _resolve_import_path uses the .py suffix to detect backend (Python) imports.
+                # Stripping .py causes Python files to be misclassified as frontend TypeScript files,
+                # generating phantom paths like "frontend/src/models.user.py.ts".
                 src_module = importer_path
-                if src_module.endswith('.py'):
-                    src_module = src_module[:-3]
                 
                 # PRIMARY FIX: The dependency file that's missing the export
                 file_path = self._resolve_import_path(src_module, target_module, repo_dir)
@@ -1694,7 +1739,8 @@ class DeploymentFixer:
             
             if process.returncode != 0:
                 fallback_cmd = ['npm', 'install', '--prefer-offline', '--no-audit']
-                self._safe_log(job_id, f"⚠️ Dependency refresh failed, retrying with {' '.join(fallback_cmd)}", "Environment", level="WARNING")
+                self._safe_log(job_id, f"⚠️ Dependency refresh failed (rc={process.returncode}), retrying with {' '.join(fallback_cmd)}", "Environment", level="WARNING")
+                self._safe_log(job_id, f"Error details: {stderr.decode()[:1000]}", "Environment", level="DEBUG")
                 
                 fallback_proc = await asyncio.create_subprocess_exec(
                     *fallback_cmd,
@@ -1705,8 +1751,10 @@ class DeploymentFixer:
                 f_stdout, f_stderr = await fallback_proc.communicate()
                 
                 if fallback_proc.returncode != 0:
-                    self._safe_log(job_id, f"❌ Dependency refresh failed: {f_stderr.decode()[:500]}", "Environment", level="ERROR")
+                    self._safe_log(job_id, f"❌ Dependency refresh failed: {f_stderr.decode()[:1000]}", "Environment", level="ERROR")
                     return False
+            
+            self._safe_log(job_id, "✅ Successfully refreshed frontend dependencies", "Environment")
             return True
         except Exception as e:
             self._safe_log(job_id, f"❌ Dependency refresh error: {e}", "Environment", level="ERROR")
@@ -1732,9 +1780,18 @@ class DeploymentFixer:
         if result.startswith('frontend/'):
             # Frontend files should be: frontend/src/... or frontend/package.json etc.
             after_frontend = result[9:]  # Remove 'frontend/'
-            # If it doesn't start with src/, app/, or is a config file, add src/
-            if not after_frontend.startswith(('src/', 'app/', 'package.json', 'tsconfig', 'next.config')):
-                result = f"frontend/src/{after_frontend}"
+            
+            # 1. Config files at root OR files already in src/, app/, or pages/ are fine
+            if after_frontend.startswith(('src/', 'app/', 'pages/', 'package.json', 'package-lock.json', 'tsconfig.json', 'jsconfig.json', 'next.config', 'public/')):
+                return result
+            
+            # 2. Known App Router files without prefix should go to app/
+            app_router_files = ('layout.tsx', 'layout.jsx', 'page.tsx', 'page.jsx', 'loading.tsx', 'loading.jsx', 'error.tsx', 'error.jsx', 'not-found.tsx', 'global.css', 'globals.css')
+            if after_frontend in app_router_files:
+                return f"frontend/app/{after_frontend}"
+                
+            # 3. Everything else defaults to src/
+            result = f"frontend/src/{after_frontend}"
         elif result.startswith('backend/'):
             # Backend files are fine as-is
             pass
@@ -1850,6 +1907,12 @@ class DeploymentFixer:
     def _should_try_programmatic(self, file_path: str, file_info: dict) -> bool:
         """Should we try programmatic fix?"""
         missing_items = [str(err) for err in file_info.get('missing', [])]
+        
+        # CRITICAL: Always prioritize AI Concatenation Errors (embedded markers)
+        # This must come BEFORE any file-path specific early returns that might skip it.
+        if any("AI Concatenation Error" in err for err in missing_items):
+            return True
+            
         if file_path.endswith(('requirements.txt', 'package.json')):
             return True
         # Missing mandatory frontend config files - always create programmatically
@@ -1872,7 +1935,8 @@ class DeploymentFixer:
         # NEW: Try programmatic fix for files with "from backend.X" errors
         if file_path.endswith('.py') and any('backend.' in err for err in missing_items):
             return True
-        if any("AI Concatenation Error" in err for err in missing_items):
+        if file_path.endswith(('.ts', '.tsx')) and any(("is not assignable to parameter of type" in err) or ("Type '" in err and "' is not assignable to type '" in err) for err in missing_items):
+            # Potential type mismatch due to redundant definitions
             return True
         return False
     
@@ -1904,6 +1968,9 @@ class DeploymentFixer:
             # NEW: Programmatic fix for "from backend.X" errors
             elif file_path.endswith('.py') and any('backend.' in str(err) for err in file_info.get('missing', [])):
                 return await self._fix_backend_prefix(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # NEW: Programmatic fix for redundant types
+            elif file_path.endswith(('.ts', '.tsx')) and any(("is not assignable to parameter of type" in str(err)) or ("Type '" in str(err) and "' is not assignable to type '" in str(err)) for err in file_info.get('missing', [])):
+                return await self._fix_redundant_types(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             return False
         except Exception as e:
             logger.error(f"Programmatic fix error: {e}")
@@ -1968,15 +2035,23 @@ class DeploymentFixer:
             
         success = True
         for p, seg_content in segments:
-            # Strip backticks
-            if seg_content.strip().startswith('```'):
-                parts = seg_content.split('\\n')
-                if len(parts) > 1 and parts[0].strip().startswith('```'):
-                    seg_content = '\\n'.join(parts[1:])
-            if seg_content.strip().endswith('```'):
-                parts = seg_content.split('\\n')
-                if len(parts) > 1 and parts[-1].strip() == '```':
-                    seg_content = '\\n'.join(parts[:-1])
+            # Aggressive cleanup of markdown artifacts and repeat markers
+            # 1. Strip leading/trailing whitespaces and repeat newlines
+            seg_content = seg_content.strip()
+            
+            # 2. Strip backticks if AI wrapped the segment
+            if seg_content.startswith('```'):
+                seg_content = re.sub(r'^```(?:\w+)?\n', '', seg_content)
+            if seg_content.endswith('```'):
+                seg_content = re.sub(r'\n```$', '', seg_content)
+                
+            # 3. Strip any residual FILE_PATH: markers that might be at the very top (redundant)
+            seg_content = re.sub(r'^FILE_PATH:[^\n]+\n', '', seg_content).strip()
+            
+            # 4. Strip residual separator lines
+            seg_content = re.sub(r'^-{3,}\n', '', seg_content)
+            seg_content = re.sub(r'\n-{3,}$', '', seg_content)
+            seg_content = seg_content.strip()
                     
             local_p = os.path.join(repo_dir, p)
             os.makedirs(os.path.dirname(local_p), exist_ok=True)
@@ -2481,16 +2556,110 @@ class DeploymentFixer:
         content = re.sub(r'import backend\.(\w+)', r'import \1', content)
         
         if content == original_content:
-            return False  # No changes needed
-        
-        # Write the fixed content
+            return False
+            
         with open(local, 'w') as f:
             f.write(content)
-        
-        self._safe_log(job_id, f"✅ Removed 'backend.' prefix from imports in {file_path}", "Backend Prefix Fix")
-        
-        # Commit to GitHub
+            
         return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    def _get_redundant_type_context(self, repo_dir: str, file_path: str, info: dict) -> str:
+        """Find multiple definitions of types mentioned in errors and provide them as context"""
+        missing = info.get('missing', [])
+        type_names = set()
+        for err in missing:
+            # Extract things like 'Ticket', 'User', etc from "Argument of type 'Ticket[]' is not assignable..."
+            matches = re.findall(r"'(\w+)(?:\[\])?'", str(err))
+            type_names.update(matches)
+        
+        if not type_names:
+            return ""
+            
+        context = "\n### 🔍 POTENTIAL TYPE CONFLICTS (Redundant Definitions Found) ###\n"
+        context += "The following types have multiple definitions in the codebase. This often causes 'is not assignable to' errors.\n"
+        context += "You MUST consolidate these or use correct imports.\n\n"
+        
+        found_any = False
+        frontend_dir = os.path.join(repo_dir, 'frontend', 'src')
+        if not os.path.exists(frontend_dir):
+            return ""
+            
+        for t_name in type_names:
+            definitions = []
+            # Scan types and components for "export interface T_NAME" or "export type T_NAME"
+            for root, _, files in os.walk(frontend_dir):
+                for f in files:
+                    if f.endswith(('.ts', '.tsx')):
+                        f_path = os.path.join(root, f)
+                        try:
+                            with open(f_path, 'r', encoding='utf-8') as file_obj:
+                                f_content = file_obj.read()
+                                if re.search(rf'export (interface|type|class|enum)\s+{re.escape(t_name)}\b', f_content):
+                                    rel_f_path = os.path.relpath(f_path, repo_dir)
+                                    definitions.append((rel_f_path, f_content))
+                        except Exception:
+                            continue
+            
+            if len(definitions) > 1:
+                found_any = True
+                context += f"🚨 Type '{t_name}' is defined in {len(definitions)} places:\n"
+                for rel_p, content in definitions:
+                    context += f"  - {rel_p}\n"
+                context += "\n"
+                for rel_p, content in definitions:
+                    context += f"--- Definition in {rel_p} ---\n"
+                    # Include the definition block
+                    match = re.search(rf'export (interface|type|class|enum)\s+{re.escape(t_name)}\b.*?\}}', content, re.DOTALL)
+                    if match:
+                        context += f"```typescript\n{match.group(0)}\n```\n"
+                    else:
+                        snippet = content[:500] + "..." if len(content) > 500 else content
+                        context += f"```typescript\n{snippet}\n```\n"
+                context += "\n"
+                
+        return context if found_any else ""
+
+    async def _fix_redundant_types(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Programmatically resolve redundant type definitions by preferring one and re-exporting"""
+        # This is a complex fix, we'll start by specifically targeting the Ticket mismatch in src/types
+        if not file_path.endswith(('.ts', '.tsx')):
+            return False
+            
+        # For now, if we see a type mismatch error and we know there are redundant types,
+        # we'll flag it. The actual "merging" is risky to do blindly.
+        # However, we can at least try to remove the redundant one from src/types/index.ts 
+        # if it's already in src/types/ticket.ts
+        
+        types_dir = os.path.join(repo_dir, 'frontend', 'src', 'types')
+        if not os.path.exists(types_dir):
+            return False
+            
+        index_ts = os.path.join(types_dir, 'index.ts')
+        ticket_ts = os.path.join(types_dir, 'ticket.ts')
+        
+        if os.path.exists(index_ts) and os.path.exists(ticket_ts):
+            with open(index_ts, 'r') as f: index_content = f.read()
+            with open(ticket_ts, 'r') as f: ticket_content = f.read()
+            
+            # If both have 'export interface Ticket'
+            pattern = r'export interface Ticket\s*\{.*?\}'
+            if re.search(pattern, index_content, re.DOTALL) and re.search(pattern, ticket_content, re.DOTALL):
+                self._safe_log(job_id, f"🧹 Orchestrator: Consolidating redundant 'Ticket' type definition in {file_path}", "Programmatic Fix")
+                
+                # Update index.ts to re-export Ticket from ticket.ts instead of defining it
+                new_index = re.sub(pattern, "export type { Ticket } from './ticket';", index_content, flags=re.DOTALL)
+                
+                # Also check for TicketStatus, TicketPriority, TicketCategory
+                for t in ['TicketStatus', 'TicketPriority', 'TicketCategory']:
+                    t_pat = rf'export type {t}\s*=[^;]+;'
+                    if re.search(t_pat, new_index) and re.search(t_pat, ticket_content):
+                        new_index = re.sub(t_pat, f"export type {{ {t} }} from './ticket';", new_index)
+                
+                if new_index != index_content:
+                    with open(index_ts, 'w') as f: f.write(new_index)
+                    return await self._commit_programmatic_fix(job_id, 'frontend/src/types/index.ts', new_index, github_repo, github_branch)
+        
+        return False
 
     async def _create_missing_backend_module(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Create a missing backend module file reported by static analysis."""

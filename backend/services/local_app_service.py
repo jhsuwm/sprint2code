@@ -248,7 +248,7 @@ class LocalAppService:
         logger.info(f"Installing frontend dependencies from package.json")
         
         # Use npm ci if package-lock.json exists, otherwise npm install
-        npm_cmd = ['npm', 'ci'] if os.path.exists(os.path.join(frontend_dir, 'package-lock.json')) else ['npm', 'install']
+        npm_cmd = ['npm', 'install']
         
         install_result = subprocess.run(
             npm_cmd,
@@ -308,6 +308,20 @@ class LocalAppService:
                             or 'local:' in line_lower
                         ):
                             ready = True
+                            # DRAIN A BIT MORE: Capture trailing logs (like ports) that often follow "Ready"
+                            logger.info("Found ready signal, draining final startup logs...")
+                            for _ in range(5):
+                                try:
+                                    extra_line = await asyncio.wait_for(
+                                        self.frontend_process.stdout.readline(),
+                                        timeout=1.0
+                                    )
+                                    if extra_line:
+                                        log_line = extra_line.decode().strip()
+                                        startup_logs.append(log_line)
+                                        logger.info(f"Frontend (drain): {log_line}")
+                                except asyncio.TimeoutError:
+                                    break
                             break
                         
                         # Check for errors
@@ -393,35 +407,34 @@ class LocalAppService:
     async def get_app_logs(self, service_type: str, limit: int = 100) -> List[str]:
         """
         Get logs from running app processes.
-        
-        Args:
-            service_type: 'backend' or 'frontend'
-            limit: Max number of log lines to return
-            
-        Returns:
-            List of log lines
         """
         process = self.backend_process if service_type == 'backend' else self.frontend_process
         
-        if not process or process.returncode is not None:
-            return [f"{service_type.title()} is not running"]
-        
+        if not process:
+            return [f"{service_type.title()} process not found"]
+            
         logs = []
         try:
-            # Try to read available output without blocking
-            while len(logs) < limit:
-                try:
-                    line = await asyncio.wait_for(process.stdout.readline(), timeout=0.1)
-                    if line:
-                        logs.append(line.decode().strip())
-                    else:
+            # Read available output from stdout and stderr
+            for stream_name in ['stdout', 'stderr']:
+                stream = getattr(process, stream_name)
+                if not stream:
+                    continue
+                    
+                while len(logs) < limit:
+                    try:
+                        # Use a very short timeout to drain existing buffer
+                        line = await asyncio.wait_for(stream.readline(), timeout=0.01)
+                        if line:
+                            logs.append(f"[{stream_name.upper()}] {line.decode().strip()}")
+                        else:
+                            break
+                    except asyncio.TimeoutError:
                         break
-                except asyncio.TimeoutError:
-                    break
         except Exception as e:
             logs.append(f"Error reading logs: {str(e)}")
         
-        return logs[-limit:]  # Return last N lines
+        return logs[-limit:]
 
     def get_startup_diagnostics(self) -> Dict[str, Any]:
         """Return last startup diagnostics captured by this service."""

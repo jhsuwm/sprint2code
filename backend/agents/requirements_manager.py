@@ -1,9 +1,7 @@
-import re
-import yaml
 from typing import Dict, Any, List, Optional
-from pathlib import Path
 from log_config import logger, error
 from agents.job_manager import job_store
+from agents.skill_registry import SkillRegistry
 
 class RequirementsManager:
     def __init__(self, job_manager, jira_service, gemini_service, github_service):
@@ -11,6 +9,7 @@ class RequirementsManager:
         self.jira_service = jira_service
         self.gemini_service = gemini_service
         self.github_service = github_service
+        self.skill_registry = SkillRegistry()
 
     async def analyze_and_plan(self, job_id: str, story_id: str):
         story = self.jira_service.get_story_details(story_id)
@@ -24,50 +23,25 @@ class RequirementsManager:
         # Attachments
         attachments_data = await self._process_attachments(job_id, story_id)
         
-        # Config
-        # Check for individual configs first, then fallback to grouped
-        frontend_config_name = job_store[job_id].get("frontend_config_name")
-        backend_config_name = job_store[job_id].get("backend_config_name")
-        config_name = job_store[job_id].get("config_name") # Unified or Legacy grouped config
+        # Load skill context
+        skill_names = job_store[job_id].get("skill_names") or []
 
-        technical_config = {}
-        
-        # Helper to process a config document from Firestore
-        def process_config_doc(doc_name, label):
-            if not doc_name: return
-            self.job_manager.log(job_id, f"Fetching {label} config: {doc_name}", "Fetching Config")
-            doc = self._fetch_config_from_firestore(doc_name)
-            if not doc:
-                self.job_manager.log(job_id, f"⚠️ Config not found in Firestore: {doc_name}. Please ensure config exists in Firestore with exact name match.", "Config Error", level="WARNING")
-                return
-            
-            c_type = doc.get("type", "grouped")
-            content = doc.get("content", "")
-            self.job_manager.log(job_id, f"Successfully loaded {label} config '{doc_name}' (type: {c_type})", "Config Loaded")
-            
-            if c_type == "frontend":
-                technical_config["frontend"] = content
-            elif c_type == "backend":
-                technical_config["backend"] = content
-            elif c_type == "grouped":
-                # For grouped/fullstack, we might have both fields or everything in content
-                technical_config["full"] = content
-                if doc.get("frontend_content"): technical_config["frontend"] = doc.get("frontend_content")
-                if doc.get("backend_content"): technical_config["backend"] = doc.get("backend_content")
-        
-        # Process all provided config names
-        process_config_doc(frontend_config_name, "Frontend")
-        process_config_doc(backend_config_name, "Backend")
-        process_config_doc(config_name, "Unified/Grouped")
-        
-        if technical_config: job_store[job_id]["technical_config"] = technical_config
+        technical_context = self.skill_registry.build_skill_context(skill_names)
+        if technical_context.get("skills"):
+            skill_list = ", ".join([s["name"] for s in technical_context["skills"]])
+            self.job_manager.log(job_id, f"Loaded skill context: {skill_list}", "Skills Loaded")
+
+        technical_config = technical_context
+
+        if technical_config:
+            job_store[job_id]["technical_config"] = technical_config
         
         # GitHub Repo & Branch Setup
         # Identify ALL unique repositories from technical config
         unique_repos = self._identify_all_repos(job_id, description, technical_config)
         
         if not unique_repos:
-            self.job_manager.log(job_id, "⚠️ No GitHub repositories identified from config or JIRA description. Code cannot be committed.", "Repo Error", level="WARNING")
+            self.job_manager.log(job_id, "⚠️ No GitHub repositories identified from skill frontmatter or JIRA description. Set github_repository in your SKILL.md files.", "Repo Error", level="WARNING")
 
         file_list = []
         if unique_repos:
@@ -94,30 +68,29 @@ class RequirementsManager:
             work_plan_context += f"Existing Project Files:\n" + "\n".join(file_list[:100]) + ("\n...(truncated)" if len(file_list) > 100 else "") + "\n\n"
         
         if technical_config:
-            # Use full config for planning if available, otherwise combine both
-            config_str = technical_config.get("full")
-            if not config_str:
-                # IMPORTANT: When separate configs are provided, make it CRYSTAL CLEAR to AI that this is a full-stack app
+            # Assemble skill content for the work plan prompt
+            skill_str = technical_config.get("full")
+            if not skill_str:
                 has_frontend = bool(technical_config.get("frontend"))
                 has_backend = bool(technical_config.get("backend"))
-                
+
                 if has_frontend and has_backend:
-                    config_str = "⚠️ FULL-STACK APPLICATION - YOU MUST GENERATE WORK PLAN FOR BOTH BACKEND AND FRONTEND\n\n"
-                    config_str += "=" * 80 + "\n"
-                    config_str += "BACKEND TECHNICAL REQUIREMENTS:\n"
-                    config_str += "=" * 80 + "\n"
-                    config_str += technical_config['backend'] + "\n\n"
-                    config_str += "=" * 80 + "\n"
-                    config_str += "FRONTEND TECHNICAL REQUIREMENTS:\n"
-                    config_str += "=" * 80 + "\n"
-                    config_str += technical_config['frontend'] + "\n"
+                    skill_str = "⚠️ FULL-STACK APPLICATION - YOU MUST GENERATE WORK PLAN FOR BOTH BACKEND AND FRONTEND\n\n"
+                    skill_str += "=" * 80 + "\n"
+                    skill_str += "BACKEND SKILL REQUIREMENTS:\n"
+                    skill_str += "=" * 80 + "\n"
+                    skill_str += technical_config['backend'] + "\n\n"
+                    skill_str += "=" * 80 + "\n"
+                    skill_str += "FRONTEND SKILL REQUIREMENTS:\n"
+                    skill_str += "=" * 80 + "\n"
+                    skill_str += technical_config['frontend'] + "\n"
                 elif has_frontend:
-                    config_str = f"Frontend Config:\n{technical_config['frontend']}\n"
+                    skill_str = f"Frontend Skills:\n{technical_config['frontend']}\n"
                 elif has_backend:
-                    config_str = f"Backend Config:\n{technical_config['backend']}\n"
+                    skill_str = f"Backend Skills:\n{technical_config['backend']}\n"
                 else:
-                    config_str = ""
-            work_plan_context += f"Technical Requirements (YAML Config):\n{config_str}"
+                    skill_str = ""
+            work_plan_context += f"Technical Requirements (Skills):\n{skill_str}"
         
         work_plan = await self.gemini_service.generate_work_plan(work_plan_context)
         job_store[job_id]["work_plan"] = work_plan
@@ -200,12 +173,19 @@ class RequirementsManager:
         return attachments_data
 
     def _identify_all_repos(self, job_id: str, description: str, technical_config: Dict[str, Any]) -> List[Dict[str, str]]:
-        """Identify all unique GitHub repositories from technical config and description."""
+        """Identify all unique GitHub repositories from skill metadata.
+
+        Priority order:
+          1. ``github_repository`` field in each SKILL.md frontmatter — the canonical
+             per-repo configuration set by the user (update this in your SKILL.md files).
+          2. JIRA story description — final fallback.
+        """
         repos = []
         seen = set()
-        
+
         def add_repo(url, source, repo_type="unknown"):
-            if not url: return
+            if not url:
+                return
             repo_info = self.github_service.extract_github_repo_from_description(f"Github: {url}")
             if repo_info:
                 repo_str = f"{repo_info['owner']}/{repo_info['repo']}"
@@ -213,33 +193,31 @@ class RequirementsManager:
                     repo_info["type"] = repo_type
                     repos.append(repo_info)
                     seen.add(repo_str)
-                    self.job_manager.log(job_id, f"Identified {repo_type} repository from {source}: {repo_str}", "Repo Identified")
+                    self.job_manager.log(
+                        job_id,
+                        f"Identified {repo_type} repository from {source}: {repo_str}",
+                        "Repo Identified",
+                    )
 
+        # ── Priority 1: github_repository from SKILL.md frontmatter ─────────────
         if technical_config:
-            # Check backend, frontend, then full/legacy
-            for key in ["backend", "frontend", "full"]:
-                content = technical_config.get(key)
-                if content:
-                    try:
-                        cfg = yaml.safe_load(content)
-                        url = cfg.get('github_repository') or cfg.get('github_url')
-                        if url:
-                            add_repo(url, f"{key} config", repo_type=key)
-                    except Exception as e:
-                        logger.warning(f"Failed to parse {key} config YAML for repo extraction: {e}")
-        
-        # Finally check description as fallback
+            for skill_info in technical_config.get("skills", []):
+                repo_url = skill_info.get("github_repository", "")
+                if repo_url:
+                    skill_type = skill_info.get("type", "full")
+                    repo_type = skill_type if skill_type in ("frontend", "backend") else "full"
+                    add_repo(repo_url, f"{skill_info['name']} skill (frontmatter)", repo_type=repo_type)
+
+        # ── Priority 2: JIRA description fallback ────────────────────────────────
         if not repos:
             repo_info = self.github_service.extract_github_repo_from_description(description)
             if repo_info:
-                add_repo(f"https://github.com/{repo_info['owner']}/{repo_info['repo']}")
-                
-        return repos
+                add_repo(
+                    f"https://github.com/{repo_info['owner']}/{repo_info['repo']}",
+                    "JIRA description",
+                )
 
-    def _setup_github_repo(self, description, technical_config):
-        # Legacy method kept for backward compatibility if needed, but analyze_and_plan uses _identify_all_repos
-        repos = self._identify_all_repos(description, technical_config)
-        return repos[0] if repos else None
+        return repos
 
     async def _setup_branch(self, job_id, story_key, github_repo, fields):
         owner, repo = github_repo["owner"], github_repo["repo"]
@@ -289,15 +267,6 @@ class RequirementsManager:
                 if created: created_subtasks.append({'id': created.get('id'), 'key': created.get('key'), 'fields': st_data})
         return created_subtasks
 
-    def _extract_config_name(self, description):
-        if not description: return None
-        if isinstance(description, dict): description = self._adf_to_text(description)
-        patterns = [r'config:\s*([a-zA-Z0-9_.-]+)', r'technical config:\s*([a-zA-Z0-9_.-]+)', r'\[config:\s*([a-zA-Z0-9_.-]+)\]', r'tech-config:\s*([a-zA-Z0-9_.-]+)']
-        for pattern in patterns:
-            match = re.search(pattern, description, re.IGNORECASE)
-            if match: return match.group(1).strip()
-        return None
-
     def _adf_to_text(self, adf):
         if not adf: return ''
         if isinstance(adf, str): return adf
@@ -320,63 +289,6 @@ class RequirementsManager:
             if any(l_lower.startswith(k) for k in ['github:', 'config:', 'technical config:', 'tech-config:']): continue
             cleaned.append(line)
         return '\n'.join(cleaned).strip()
-
-    def _fetch_config_from_firestore(self, config_name: str):
-        """
-        Fetch config from local file system (OSS standalone version).
-        Reads directly from the config folder.
-        """
-        try:
-            # Get the config folder path (3 levels up from agents/ directory)
-            config_dir = Path(__file__).parent.parent.parent / "config"
-            
-            if not config_dir.exists():
-                logger.warning(f"Config directory not found: {config_dir}")
-                return None
-            
-            # Try to find the config file
-            # Look for both .yaml and .yml extensions
-            possible_files = [
-                config_dir / f"{config_name}.yaml",
-                config_dir / f"{config_name}.yml",
-                config_dir / config_name  # In case the full filename with extension is provided
-            ]
-            
-            config_file = None
-            for file_path in possible_files:
-                if file_path.exists():
-                    config_file = file_path
-                    break
-            
-            if not config_file:
-                logger.warning(f"Config file not found for '{config_name}' in {config_dir}")
-                return None
-            
-            # Read the YAML file
-            with open(config_file, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # Detect type from filename
-            filename = config_file.name
-            if 'frontend' in filename.lower():
-                config_type = 'frontend'
-            elif 'backend' in filename.lower():
-                config_type = 'backend'
-            else:
-                config_type = 'grouped'
-            
-            logger.info(f"Successfully loaded local config file: {filename} (type: {config_type})")
-            
-            # Return in the same format as Firestore would
-            return {
-                "name": config_name,
-                "type": config_type,
-                "content": content
-            }
-            
-        except Exception as e:
-            logger.warning(f"Error reading local config '{config_name}': {e}")
-            return None
 
     def _get_mime_type(self, filename):
         ext = filename.lower().split('.')[-1]

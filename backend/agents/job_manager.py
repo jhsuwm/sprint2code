@@ -1,6 +1,4 @@
 import uuid
-import re
-import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from log_config import logger, error
@@ -13,21 +11,17 @@ class JobManager:
         self.jira_service = jira_service
 
     def create_job(
-        self, 
-        story_id: str, 
-        user_email: str, 
-        config_name: Optional[str] = None, # Legacy grouped config name
-        frontend_config_name: Optional[str] = None,
-        backend_config_name: Optional[str] = None
+        self,
+        story_id: str,
+        user_email: str,
+        skill_names: Optional[List[str]] = None
     ) -> str:
         job_id = str(uuid.uuid4())
         job_store[job_id] = {
             "id": job_id,
             "story_id": story_id,
             "user_email": user_email,
-            "config_name": config_name,
-            "frontend_config_name": frontend_config_name,
-            "backend_config_name": backend_config_name,
+            "skill_names": skill_names or [],
             "status": "RUNNING",
             "logs": [],
             "frontend_logs": [],
@@ -109,8 +103,9 @@ class JobManager:
         if job.get('pull_request_url'):
             pr_url = job.get('pull_request_url')
             bullet_items.append({"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Pull Request: ", "marks": [{"type": "strong"}]}, {"type": "text", "text": pr_url, "marks": [{"type": "link", "attrs": {"href": pr_url}}]}]}]})
-        if job.get('technical_config'):
-            bullet_items.append({"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": f"Technical Config: {job.get('technical_config')}", "marks": [{"type": "strong"}]}]}]})
+        if job.get('skill_names'):
+            skills_str = ", ".join(job['skill_names'])
+            bullet_items.append({"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": f"Skills: {skills_str}", "marks": [{"type": "strong"}]}]}]})
         
         content.append({"type": "bulletList", "content": bullet_items})
         content.append({"type": "rule"})

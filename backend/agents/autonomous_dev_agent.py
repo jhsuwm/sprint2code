@@ -1,7 +1,7 @@
 import asyncio
 from typing import Dict, Any, List, Optional
 from services.jira_service import JiraService
-from services.gemini_service import GeminiService
+from services.ai_service import AIService
 from services.github_service import GitHubService
 from services.local_app_service import LocalAppService
 from agents.job_manager import JobManager, job_store
@@ -13,14 +13,14 @@ from log_config import logger
 class AutonomousDevAgent:
     def __init__(self):
         self.jira_service = JiraService()
-        self.gemini_service = GeminiService()
+        self.ai_service = AIService()
         self.github_service = GitHubService()
         self.local_app_service = LocalAppService()
         
         self.job_manager = JobManager(self.jira_service)
-        self.requirements_manager = RequirementsManager(self.job_manager, self.jira_service, self.gemini_service, self.github_service)
-        self.code_execution_manager = CodeExecutionManager(self.job_manager, self.gemini_service, self.github_service, self.jira_service)
-        self.deployment_manager = DeploymentManager(self.job_manager, self.local_app_service, self.github_service, self.gemini_service, self.jira_service)
+        self.requirements_manager = RequirementsManager(self.job_manager, self.jira_service, self.ai_service, self.github_service)
+        self.code_execution_manager = CodeExecutionManager(self.job_manager, self.ai_service, self.github_service, self.jira_service)
+        self.deployment_manager = DeploymentManager(self.job_manager, self.local_app_service, self.github_service, self.ai_service, self.jira_service)
 
     async def create_story_from_chat(self, prompt: str, attachments: List[Dict[str, Any]], user_email: str, project_key: str = None, epic_key: str = None) -> Dict[str, Any]:
         logger.info(f"Creating story from chat for user: {user_email}")
@@ -30,7 +30,7 @@ class AutonomousDevAgent:
             if 'filename' in att:
                 att['mime_type'] = self.requirements_manager._get_mime_type(att['filename'])
         
-        prd = await self.gemini_service.generate_prd(prompt, attachments)
+        prd = await self.ai_service.generate_prd(prompt, attachments)
         story = self.jira_service.create_story(summary=f"AI Story: {prompt[:80]}...", description=prd, project_key=project_key, epic_key=epic_key)
         if not story or not story.get("id"): raise Exception("Failed to create JIRA story")
         
@@ -42,19 +42,15 @@ class AutonomousDevAgent:
         return {"story_id": story["id"], "story_key": story["key"], "prd": prd}
 
     async def start_job(
-        self, 
-        story_id: str, 
-        user_email: str, 
-        config_name: Optional[str] = None, # Legacy grouped config name
-        frontend_config_name: Optional[str] = None,
-        backend_config_name: Optional[str] = None
+        self,
+        story_id: str,
+        user_email: str,
+        skill_names: Optional[List[str]] = None
     ) -> str:
         job_id = self.job_manager.create_job(
-            story_id, 
-            user_email, 
-            config_name, 
-            frontend_config_name=frontend_config_name,
-            backend_config_name=backend_config_name
+            story_id,
+            user_email,
+            skill_names=skill_names
         )
         asyncio.create_task(self._run_pipeline(job_id, story_id))
         return job_id

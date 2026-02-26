@@ -104,6 +104,7 @@ export default function AutonomousDevDashboard() {
         },
         body: JSON.stringify({
           story_id: storyId,
+          skill_names: selectedConfigs.map(c => c.name),
           config_name: selectedConfigs.find(c => c.type === 'grouped')?.name,
           frontend_config_name: selectedConfigs.find(c => c.type === 'frontend')?.name,
           backend_config_name: selectedConfigs.find(c => c.type === 'backend')?.name,
@@ -239,7 +240,7 @@ export default function AutonomousDevDashboard() {
     setLoadingLocalConfigs(true);
     try {
       const token = getAuthToken();
-      const res = await fetch(`${BACKEND_URL}/autonomous-dev/local-configs`, {
+      const res = await fetch(`${BACKEND_URL}/autonomous-dev/local-skills`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
@@ -277,7 +278,7 @@ export default function AutonomousDevDashboard() {
     setLoadingLocalConfigs(true);
     try {
       const token = getAuthToken();
-      const res = await fetch(`${BACKEND_URL}/autonomous-dev/local-configs`, {
+      const res = await fetch(`${BACKEND_URL}/autonomous-dev/local-skills`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
@@ -304,9 +305,9 @@ export default function AutonomousDevDashboard() {
   const handleSelectLocalConfigFile = (file: any) => {
     // Auto-detect type from filename
     let detectedType: 'frontend' | 'backend' | 'fullstack' = 'fullstack';
-    if (file.name.includes('frontend')) {
+    if (file.type === 'frontend' || file.name.includes('frontend')) {
       detectedType = 'frontend';
-    } else if (file.name.includes('backend')) {
+    } else if (file.type === 'backend' || file.name.includes('backend')) {
       detectedType = 'backend';
     }
     
@@ -314,9 +315,9 @@ export default function AutonomousDevDashboard() {
     
     // Create new config object
     const newConfig = { 
-      name: file.name.replace('.yaml', '').replace('.yml', ''),
+      name: file.name,
       type: configType,
-      local_file: file.name // Mark this as a local file reference
+      local_skill: file.name
     };
     
     // Remove any existing config of the same type, then add the new one
@@ -361,13 +362,13 @@ export default function AutonomousDevDashboard() {
           <button 
             onClick={openConfigModal}
             className="bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-700 hover:to-violet-700 text-white px-4 py-1.5 rounded-full text-xs font-semibold transition-all duration-300 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 flex items-center group min-w-[140px] max-w-[280px]"
-            title={selectedConfigs.length > 0 ? `Selected: ${selectedConfigs.map(c => c.name).join(', ')}` : 'Select Technical Config'}
+            title={selectedConfigs.length > 0 ? `Selected: ${selectedConfigs.map(c => c.name).join(', ')}` : 'Select Agent Skills'}
           >
             <svg className="w-4 h-4 mr-1.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
             </svg>
             <span className="truncate">
-              {selectedConfigs.length > 0 ? selectedConfigs.map(c => c.name).join(', ') : 'Technical Config'}
+              {selectedConfigs.length > 0 ? selectedConfigs.map(c => c.name).join(', ') : 'Agent Skills'}
             </span>
           </button>
         </div>
@@ -530,15 +531,15 @@ export default function AutonomousDevDashboard() {
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
           <div className="bg-white w-full max-w-3xl max-h-[90vh] shadow-2xl rounded-2xl overflow-hidden flex flex-col">
             <div className="flex justify-between items-center p-6 border-b">
-              <h2 className="text-2xl font-bold">Technical Config</h2>
+              <h2 className="text-2xl font-bold">Agent Skills</h2>
               <button onClick={closeConfigModal} className="text-slate-400 hover:text-slate-600">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
             <div className="overflow-y-auto flex-1 p-6">
               <div>
-                <h3 className="text-lg font-bold text-slate-800 mb-1">Available Config Files</h3>
-                <p className="text-sm text-slate-600 mb-4">Click on a config file to toggle selection. Selected configs will be used during code generation.</p>
+                <h3 className="text-lg font-bold text-slate-800 mb-1">Available Skills</h3>
+                <p className="text-sm text-slate-600 mb-4">Click on a skill to toggle selection. Selected skills will be used during code generation and auto-fix.</p>
                 
                 {loadingLocalConfigs ? (
                   <div className="flex justify-center items-center py-10">
@@ -549,8 +550,8 @@ export default function AutonomousDevDashboard() {
                     <svg className="w-12 h-12 mx-auto mb-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
-                    <p className="text-sm font-semibold">No config files found</p>
-                    <p className="text-xs mt-1">Add YAML files to the config folder</p>
+                    <p className="text-sm font-semibold">No skills found</p>
+                    <p className="text-xs mt-1">Add SKILL.md files under config/skills</p>
                   </div>
                 ) : (
                   <div className="space-y-2 max-h-[500px] overflow-y-auto">
@@ -561,7 +562,7 @@ export default function AutonomousDevDashboard() {
                       const configType = isBackend ? 'backend' : isFrontend ? 'frontend' : 'grouped';
                       
                       // Check if this file is already selected
-                      const isSelected = selectedConfigs.some(c => c.local_file === file.name);
+                      const isSelected = selectedConfigs.some(c => c.name === file.name);
                       const baseColorClass = isBackend ? 'border-green-300 bg-green-50' : isFrontend ? 'border-blue-300 bg-blue-50' : 'border-purple-300 bg-purple-50';
                       const selectedColorClass = isBackend ? 'border-green-500 bg-green-100' : isFrontend ? 'border-blue-500 bg-blue-100' : 'border-purple-500 bg-purple-100';
                       const badgeClass = isBackend ? 'bg-green-100 text-green-700' : isFrontend ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700';
@@ -578,9 +579,9 @@ export default function AutonomousDevDashboard() {
                                 if (!isSelected) {
                                   // Select
                                   const newConfig = { 
-                                    name: file.name.replace('.yaml', '').replace('.yml', ''),
+                                    name: file.name,
                                     type: configType,
-                                    local_file: file.name
+                                    local_skill: file.name
                                   };
                                   // Remove existing config of same type, add new one
                                   const updatedConfigs = [
@@ -619,12 +620,12 @@ export default function AutonomousDevDashboard() {
                                 <button
                                   onClick={() => {
                                     // Deselect
-                                    const updatedConfigs = selectedConfigs.filter(c => c.local_file !== file.name);
+                                    const updatedConfigs = selectedConfigs.filter(c => c.name !== file.name);
                                     setSelectedConfigs(updatedConfigs);
                                     localStorage.setItem('selectedConfigs', JSON.stringify(updatedConfigs));
                                   }}
                                   className="p-1.5 hover:bg-red-100 rounded-lg transition-colors group"
-                                  title="Remove this config"
+                                  title="Remove this skill"
                                 >
                                   <svg className="w-4 h-4 text-slate-600 group-hover:text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />

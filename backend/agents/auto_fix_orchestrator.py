@@ -96,6 +96,18 @@ class AutoFixOrchestrator:
             if job_id not in self._file_total_attempts:
                 self._file_total_attempts[job_id] = {}
             
+            # PROACTIVE REFRESH: If node_modules is missing from the start, we must refresh it 
+            # to allow valid error reporting and prevent workers from hitting guardrails.
+            if any("Missing 'node_modules'" in str(e) for e in all_errors):
+                self.job_manager.log(job_id, "🚀 Orchestrator: Detected missing node_modules at start of cycle. Triggering refresh...", "Orchestrator")
+                await self.fixer._refresh_frontend_dependencies(repo_dir, job_id)
+                # Re-validate to clear the error so workers can proceed if possible
+                all_errors = self.fixer.validator.validate_all(repo_dir)
+                files_to_fix = self.fixer._parse_all_errors(all_errors, repo_dir)
+                if not files_to_fix:
+                    self.job_manager.log(job_id, "✅ Orchestrator: All errors resolved via initial dependency refresh", "Orchestrator")
+                    return True
+
             # Try programmatic fixes first (fast and deterministic)
             programmatic_fixed = []
             for file_path, file_info in list(files_to_fix.items()):
@@ -111,6 +123,8 @@ class AutoFixOrchestrator:
                         # OPTIMIZATION A: Mark as successfully fixed
                         self._programmatic_fix_history[job_id].add(file_path)
                         del files_to_fix[file_path]
+                    else:
+                        self.job_manager.log(job_id, f"⚠️ Orchestrator: Programmatic fix failed for {file_path} (falling back to AI)", "Orchestrator", level="WARNING")
             
             if programmatic_fixed:
                 self.job_manager.log(job_id, f"✅ Orchestrator: {len(programmatic_fixed)} programmatic fixes applied. Re-validating codebase before AI generation...", "Orchestrator")
@@ -203,7 +217,7 @@ class AutoFixOrchestrator:
             
             # Create tasks and put them directly into worker-specific queues
             for file_path, file_info in prioritized_files:
-                # Determine relevant YAML context based on file type
+                # Determine relevant technical context (skills/config) based on file type
                 file_yaml_context = self.fixer._load_yaml_context(job_id, repo_dir, file_path)
                 
                 assigned_worker_id = file_to_worker_assignments[file_path]

@@ -25,7 +25,7 @@ An open-source autonomous development agent that transforms product ideas into w
 ### Frontend (Next.js/React)
 - **Dashboard**: Real-time view of agent execution logs and app health
 - **Chat Interface**: Natural language input for product ideas with file attachments
-- **Config Management**: Store and manage technical specifications (YAML configs)
+- **Skills Management**: Store and manage technical specifications with modular `SKILL.md` files
 
 ## 🚀 Getting Started
 
@@ -86,7 +86,7 @@ Required environment variables in `.env`:
 - `JIRA_API_TOKEN` - JIRA API token
 - `JWT_SECRET_KEY` - Secret key for JWT token generation (use a strong random string)
 
-**Note:** Google Cloud/Firestore is optional and not required for core functionality. Config files are stored locally in the `/config` folder.
+**Note:** Google Cloud/Firestore is optional and not required for core functionality. Skills are stored locally in the `/config/skills` folder.
 
 4. Start the backend:
 ```bash
@@ -123,45 +123,25 @@ Frontend will run on `http://localhost:3000`
 
 ## 📝 Usage
 
-### 1. Configure Technical Specs
+### 1. Configure Agent Skills
 
-Create YAML configuration files in the `/config` folder that define your technical stack. You can use the provided examples as templates.
+Create skill folders under `/config/skills`, each with a `SKILL.md` file that declares technical standards and workflow constraints.
 
-**Create your config file:**
+**Use the provided examples:**
 ```bash
-# Copy an example and customize it
-cp config/backend-config-example.yaml config/my-backend-config.yaml
-cp config/frontend-config-example.yaml config/my-frontend-config.yaml
-
-# Edit the files with your project details
+ls config/skills
 ```
 
-**Example: backend-config.yaml**
-```yaml
-company_name: "MyApp"
-github_repository: https://github.com/username/backend-repo.git
-backend:
-  framework: fastapi
-  language: python
-  python_version: "3.11"
-  database:
-    provider: firestore
-  authentication:
-    method: jwt
+**Example skill header:**
+```md
+---
+name: frontend-nextjs-standard
+description: Frontend implementation standards for Next.js TypeScript apps
+type: frontend
+---
 ```
 
-**Example: frontend-config.yaml**
-```yaml
-company_name: "MyApp"
-github_repository: https://github.com/username/frontend-repo.git
-frontend:
-  framework: nextjs
-  language: typescript
-  styling:
-    library: tailwindcss
-```
-
-**In the dashboard:** When you click "Technical Config", select which local YAML config file(s) to use for the autonomous dev pipeline. The configs are loaded directly from your `/config` folder.
+**In the dashboard:** Click **Agent Skills** and select one or more local skills. Selected skills are injected into planning, generation, and auto-fix context.
 
 ### 2. Select JIRA Epic
 
@@ -279,14 +259,15 @@ kill $(cat .orion-pids | grep FRONTEND_PID | cut -d= -f2)
 Detailed documentation available in `/docs`:
 - `AUTONOMOUS_DEV_WORKFLOW.md` - Complete workflow guide
 - `AUTONOMOUS_DEV_GITHUB_INTEGRATION.md` - GitHub setup
-- `AUTONOMOUS_DEV_YAML_CONFIG.md` - Config file specifications
+- `agent_skills_specification.md` - Agent skills implementation specification
 - `JIRA_SETUP.md` - JIRA integration guide
 
 ## 🔧 Configuration Examples
 
-Sample YAML configuration files are available in `/config`:
-- `backend-config-example.yaml` - Backend technical specifications template
-- `frontend-config-example.yaml` - Frontend technical specifications template
+Sample skills are available in `/config/skills`:
+- `backend-fastapi-standard/SKILL.md` - Backend technical standards
+- `frontend-nextjs-standard/SKILL.md` - Frontend technical standards
+- `fullstack-quality-gate/SKILL.md` - Static-analysis and auto-fix quality gate
 
 ## 🤝 Contributing
 

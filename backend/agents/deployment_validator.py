@@ -224,6 +224,12 @@ class DeploymentValidator:
                     continue
                 errors.append(f"Missing mandatory file: '{m_file}' ({m_desc}) is required")
 
+        # NEW: Check for App Router (app/) or Pages Router (pages/)
+        has_app = os.path.exists(os.path.join(frontend_dir, 'app')) or os.path.exists(os.path.join(frontend_dir, 'src', 'app'))
+        has_pages = os.path.exists(os.path.join(frontend_dir, 'pages')) or os.path.exists(os.path.join(frontend_dir, 'src', 'pages'))
+        if not (has_app or has_pages):
+            errors.append("ENVIRONMENT ERROR: Missing mandatory directory: Frontend must have either an 'app' directory (App Router) or 'pages' directory (Pages Router). This is required for Next.js to start.")
+
         package_json_path = os.path.join(frontend_dir, 'package.json')
         if not os.path.exists(package_json_path):
             return errors
@@ -339,6 +345,7 @@ class DeploymentValidator:
         if not os.path.exists(frontend_dir) or not os.path.exists(os.path.join(frontend_dir, 'tsconfig.json')):
             return []
         
+        node_modules_path = os.path.join(frontend_dir, 'node_modules')
         if not os.path.exists(node_modules_path):
             logger.warning(f"node_modules not found in {frontend_dir}, skipping TypeScript validation")
             return ["ENVIRONMENT ERROR: TypeScript validation skipped because 'node_modules' is missing. Run 'npm install'."]
