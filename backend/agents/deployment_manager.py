@@ -16,20 +16,20 @@ from agents.auto_fix_orchestrator import AutoFixOrchestrator
 from agents.skill_registry import SkillRegistry
 
 class DeploymentManager:
-    def __init__(self, job_manager, local_app_service, github_service, gemini_service, jira_service):
+    def __init__(self, job_manager, local_app_service, github_service, ai_service, jira_service):
         self.job_manager = job_manager
         self.local_app_service = local_app_service
         self.github_service = github_service
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
         self.jira_service = jira_service
         
         self.validator = DeploymentValidator()
-        self.fixer = DeploymentFixer(job_manager, gemini_service, github_service, jira_service)
+        self.fixer = DeploymentFixer(job_manager, ai_service, github_service, jira_service)
         self.skill_registry = SkillRegistry()
         
         # Parallel auto-fix orchestrator with 2 workers
         num_workers = int(os.getenv('AUTO_FIX_WORKERS', '2'))
-        self.orchestrator = AutoFixOrchestrator(job_manager, gemini_service, github_service, jira_service, num_workers=num_workers)
+        self.orchestrator = AutoFixOrchestrator(job_manager, ai_service, github_service, jira_service, num_workers=num_workers)
 
     async def start_app_locally(self, job_id: str, epic_key: str, story_key: str, project_key: Optional[str] = None):
         """
@@ -904,6 +904,12 @@ class DeploymentManager:
         if missing_mod:
             missing_name = missing_mod.group(1)
             errors.append(f"Missing dependency: '{missing_name}' in requirements.txt")
+
+        # FastAPI file upload runtime guard:
+        # RuntimeError: Form data requires "python-multipart" to be installed.
+        # This often appears without ModuleNotFoundError, so map it explicitly.
+        if re.search(r'Form data requires ["\']python-multipart["\'] to be installed', combined, re.IGNORECASE):
+            errors.append("Missing dependency: 'python-multipart' in requirements.txt")
 
         cannot_import = re.search(
             r"ImportError:\s+cannot import name ['\"]([^'\"]+)['\"] from ['\"]([^'\"]+)['\"]",

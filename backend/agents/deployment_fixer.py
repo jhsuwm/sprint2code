@@ -14,9 +14,9 @@ from agents.job_manager import job_store
 class DeploymentFixer:
     """Optimized auto-fixer with batching"""
     
-    def __init__(self, job_manager, gemini_service, github_service, jira_service):
+    def __init__(self, job_manager, ai_service, github_service, jira_service):
         self.job_manager = job_manager
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
         self.github_service = github_service
         self.jira_service = jira_service
         
@@ -580,7 +580,7 @@ class DeploymentFixer:
                 # OPTIMIZATION D: Reduced timeout for faster failure
                 timeout = 30.0  # Reduced from 45s for faster failure
                 
-                result = await self.gemini_service.generate_code(
+                result = await self.ai_service.generate_code(
                     task_description=f"Fix {len(batch)} files",
                     context=combined_prompt,
                     story_context="",
@@ -604,7 +604,7 @@ class DeploymentFixer:
                         individual_results.append(result)
                     return individual_results
                 
-                parsed = self.gemini_service.parse_generated_code(code)
+                parsed = self.ai_service.parse_generated_code(code)
                 if not parsed:
                     self.job_manager.log(job_id, f"❌ Batch: Failed to parse (retry {retry+1}/{max_retries})", "Parse Failed", level="WARNING")
                     if retry < max_retries - 1:
@@ -861,7 +861,7 @@ class DeploymentFixer:
             timeout = base_timeout + (content_size / 1000) * 10.0
             timeout = min(timeout, 150.0)
             
-            result = await self.gemini_service.generate_code(
+            result = await self.ai_service.generate_code(
                 task_description=f"Fix {target_file}",
                 context=prompt,
                 story_context="",
@@ -877,7 +877,7 @@ class DeploymentFixer:
             if finish_reason == 'MAX_TOKENS':
                 return None
             
-            parsed = self.gemini_service.parse_generated_code(code)
+            parsed = self.ai_service.parse_generated_code(code)
             if not parsed:
                 return None
 
@@ -1003,7 +1003,7 @@ class DeploymentFixer:
                 if retry > 0: timeout += 30.0 # More time on retries
                 timeout = min(timeout, 150.0) # Cap at 2.5 minutes
                 
-                result = await self.gemini_service.generate_code(
+                result = await self.ai_service.generate_code(
                     task_description=f"Fix {target_file}",
                     context=prompt,
                     story_context="",
@@ -1023,7 +1023,7 @@ class DeploymentFixer:
                     else:
                         return False
                 
-                parsed = self.gemini_service.parse_generated_code(code)
+                parsed = self.ai_service.parse_generated_code(code)
                 if not parsed:
                     self.job_manager.log(job_id, f"❌ {target_file}: Failed to parse AI output (retry {retry+1}/{max_retries})", "Parse Failed", level="WARNING")
                     if retry < max_retries - 1:
@@ -1527,7 +1527,7 @@ class DeploymentFixer:
                     'google', 'firebase', 'sqlalchemy', 'alembic', 'redis',
                     'celery', 'requests', 'httpx', 'aiohttp', 'boto3', 'stripe',
                     'flask', 'django', 'numpy', 'pandas', 'scipy', 'sklearn',
-                    'tensorflow', 'torch', 'keras', 'passlib', 'pytest',
+                    'tensorflow', 'torch', 'keras', 'passlib', 'pytest', 'bson', 'pyjwt',
                     'click', 'jinja2', 'email_validator'
                 }
                 is_package = (
@@ -1551,8 +1551,11 @@ class DeploymentFixer:
                         'pydantic_settings': 'pydantic-settings',
                         'jose': 'python-jose[cryptography]',
                         'jwt_utils': 'PyJWT',
+                        'pyjwt': 'PyJWT',
                         'email_validator': 'email-validator',
                         'passlib': 'passlib[bcrypt]',
+                        'passlib.context': 'passlib[bcrypt]',
+                        'bson': 'pymongo',
                         'google.cloud.firestore': 'google-cloud-firestore',
                         'google.cloud.storage': 'google-cloud-storage',
                         'google.cloud.secretmanager': 'google-cloud-secret-manager',
@@ -2153,9 +2156,10 @@ class DeploymentFixer:
             'jwt_utils': 'PyJWT',
             'jose': 'python-jose[cryptography]',
             'jwt': 'PyJWT',
-            'PyJWT': 'PyJWT',      # already the correct PyPI name
+            'pyjwt': 'PyJWT',
             'bcrypt': 'bcrypt',
             'passlib': 'passlib[bcrypt]',
+            'passlib.context': 'passlib[bcrypt]',
             'cryptography': 'cryptography',
             
             # Config & Environment
@@ -2181,6 +2185,7 @@ class DeploymentFixer:
             'alembic': 'alembic',
             'psycopg2': 'psycopg2-binary',
             'pymongo': 'pymongo',
+            'bson': 'pymongo',
             'redis': 'redis',
             
             # Google Cloud
@@ -2211,6 +2216,9 @@ class DeploymentFixer:
             'tqdm': 'tqdm',
             'pytest': 'pytest'
         }
+
+        # Normalize package map to lowercase keys for case-insensitive lookup.
+        pkg_map = {k.lower(): v for k, v in pkg_map.items()}
         
         # CRITICAL: Filter out invalid package names (model names, local modules, etc.)
         invalid_packages = {
@@ -2219,19 +2227,20 @@ class DeploymentFixer:
         }
         
         for pkg in packages:
+            if not pkg:
+                continue
+            pkg_normalized = pkg.strip()
+            pkg_lower = pkg_normalized.lower()
             # Skip invalid packages
-            if pkg.lower() in invalid_packages:
-                self._safe_log(job_id, f"⏭️ Skipping invalid package: {pkg} (likely a model/module name)", "Package Filter")
+            if pkg_lower in invalid_packages:
+                self._safe_log(job_id, f"⏭️ Skipping invalid package: {pkg_normalized} (likely a model/module name)", "Package Filter")
                 continue
             
-            real_pkg = pkg_map.get(pkg, pkg)
-            
-            # Only add if it's a known mapping or starts with common package prefixes
-            is_known = pkg in pkg_map
-            is_valid_prefix = any(real_pkg.startswith(prefix) for prefix in ['python-', 'google-', 'firebase-', 'django-', 'flask-', 'fastapi'])
-            
-            if not is_known and not is_valid_prefix:
-                self._safe_log(job_id, f"⏭️ Skipping unknown package: {pkg} (not in package map)", "Package Filter")
+            real_pkg = pkg_map.get(pkg_lower, pkg_normalized)
+            # Accept package-like names by default to avoid skipping valid dependencies.
+            # Examples: PyJWT, email-validator, python-jose[cryptography]
+            if not re.match(r'^[A-Za-z0-9][A-Za-z0-9_.-]*(\[[A-Za-z0-9_,.-]+\])?$', real_pkg):
+                self._safe_log(job_id, f"⏭️ Skipping invalid package token: {pkg_normalized}", "Package Filter")
                 continue
             
             # Use regex for more robust package check (avoid matching 'pydantic' in 'pydantic-settings')

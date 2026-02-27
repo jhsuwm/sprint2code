@@ -8,10 +8,10 @@ from agents.deployment_fixer import DeploymentFixer
 @pytest.fixture
 def mock_fixer():
     job_manager = MagicMock()
-    gemini_service = MagicMock()
+    ai_service = MagicMock()
     github_service = MagicMock()
     jira_service = MagicMock()
-    fixer = DeploymentFixer(job_manager, gemini_service, github_service, jira_service)
+    fixer = DeploymentFixer(job_manager, ai_service, github_service, jira_service)
     fixer._commit_programmatic_fix = AsyncMock(return_value=True)
     fixer._safe_log = MagicMock()
     return fixer

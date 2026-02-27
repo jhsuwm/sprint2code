@@ -13,15 +13,15 @@ from agents.deployment_fixer import DeploymentFixer
 class AutoFixWorker:
     """Worker agent that processes auto-fix tasks from a queue"""
     
-    def __init__(self, worker_id: int, job_manager, gemini_service, github_service, jira_service):
+    def __init__(self, worker_id: int, job_manager, ai_service, github_service, jira_service):
         self.worker_id = worker_id
         self.job_manager = job_manager
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
         self.github_service = github_service
         self.jira_service = jira_service
         
         # Each worker has its own fixer instance to avoid conflicts
-        self.fixer = DeploymentFixer(job_manager, gemini_service, github_service, jira_service)
+        self.fixer = DeploymentFixer(job_manager, ai_service, github_service, jira_service)
         
         self.is_busy = False
         self.current_task = None

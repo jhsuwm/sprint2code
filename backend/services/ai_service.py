@@ -236,9 +236,8 @@ class AIService:
         """Initialize Google Gemini API client."""
         try:
             from google import genai
-            from google.generativeai import GenerativeModel
         except ImportError:
-            error("google-generativeai package not installed. Install with: pip install google-generativeai", "AIService")
+            error("google-genai package not installed. Install with: pip install google-genai", "AIService")
             return
         
         self.api_key = os.getenv("GEMINI_API_KEY")
@@ -247,13 +246,14 @@ class AIService:
         
         if self.api_key:
             try:
-                # Configure with optional custom API URL
+                # Configure using the new google-genai client.
                 api_url = os.getenv("GEMINI_API_URL")
-                genai.configure(api_key=self.api_key)
-                # If custom API URL is provided, it can be used by setting up custom transport
                 if api_url:
-                    logger.info(f"Using custom Gemini API URL: {api_url}")
-                self.client = GenerativeModel(self.model_name)
+                    # Keep behavior explicit: custom URL support is not wired for google-genai here.
+                    logger.warning(
+                        "GEMINI_API_URL is set but custom Gemini base URL is not supported in this build; using default Google endpoint."
+                    )
+                self.client = genai.Client(api_key=self.api_key)
                 logger.info(f"AIService (Gemini) initialized with model: {self.model_name}")
             except Exception as e:
                 error(f"Failed to initialize Gemini client: {e}", "AIService")
@@ -449,6 +449,9 @@ Desc: [Detailed description]
 ---
 
 🎯 GOLDEN RULE: Group related functionality together. Dependencies BEFORE Dependents.
+🚨 CRITICAL OUTPUT REQUIREMENT:
+- Produce at least 8 subtasks for full-stack requirements; at least 5 for single-stack requirements.
+- Do not collapse the plan into a couple of broad subtasks.
 """
         
         try:
@@ -539,13 +542,18 @@ Desc: [Detailed description]
         
         🎯 GOLDEN RULE FOR SUBTASK ORDER:
         "Dependencies BEFORE Dependents. Always."
+        
+        🚨 CRITICAL OUTPUT REQUIREMENT:
+        - Produce at least 8 subtasks for full-stack requirements; at least 5 for single-stack requirements.
+        - Do not collapse the plan into a couple of broad subtasks.
         """
         
         async def call_gemini():
             return await asyncio.to_thread(
-                self.client.generate_content,
-                full_prompt,
-                generation_config={"temperature": 0.7, "max_output_tokens": 4096}
+                self.client.models.generate_content,
+                model=self.model,
+                contents=full_prompt,
+                config={"temperature": 0.7, "max_output_tokens": 4096}
             )
         
         response = await self._call_with_retry(call_gemini, timeout=300.0)
@@ -590,30 +598,44 @@ Desc: [Detailed description]
         return response.choices[0].message.content
     
     def parse_work_plan(self, work_plan: str) -> List[Dict[str, str]]:
-        """Parse work plan to extract subtasks."""
-        subtasks = []
-        parts = work_plan.split('SUBTASK:')
-        
-        for part in parts[1:]:
-            if 'Desc:' not in part:
-                continue
-            
-            lines = part.split('\n')
-            summary = lines[0].strip()
-            summary = re.sub(r'^\d+[\.:\s]+', '', summary).strip()
-            
-            desc_start = part.find('Desc:')
-            if desc_start == -1:
-                continue
-            
-            remaining = part[desc_start + 5:]
-            desc_end = remaining.find('---')
-            description = (remaining[:desc_end].strip() if desc_end != -1 else remaining.strip())
-            
+        """Parse work plan to extract subtasks from strict and common variant formats."""
+        subtasks: List[Dict[str, str]] = []
+        if not work_plan:
+            return subtasks
+
+        # Primary format:
+        # SUBTASK: <title>
+        # Desc|Description: <details>
+        # ---
+        primary_pattern = re.compile(
+            r"SUBTASK:\s*(?P<title>[^\n]+)\n(?:(?:Desc|Description)\s*:\s*)(?P<desc>.*?)(?=\n---|\nSUBTASK:|\Z)",
+            re.DOTALL | re.IGNORECASE,
+        )
+        for match in primary_pattern.finditer(work_plan):
+            summary = re.sub(r'^\d+[\.:\s]+', '', match.group("title").strip()).strip()
+            description = match.group("desc").strip()
             if summary and description:
-                subtasks.append({'summary': summary, 'description': description})
+                subtasks.append({"summary": summary, "description": description})
                 logger.info(f"Parsed subtask: {summary}")
-        
+
+        # Fallback format (common model drift):
+        # 1. <title>
+        # Desc|Description: <details>
+        fallback_pattern = re.compile(
+            r"^\s*\d+[.)]\s*(?P<title>[^\n]+)\n(?:(?:Desc|Description)\s*:\s*)(?P<desc>.*?)(?=\n\s*\d+[.)]\s+|\Z)",
+            re.DOTALL | re.IGNORECASE | re.MULTILINE,
+        )
+        for match in fallback_pattern.finditer(work_plan):
+            summary = match.group("title").strip()
+            description = match.group("desc").strip()
+            if not summary or not description:
+                continue
+            # Merge with primary results while preserving order.
+            if any(s["summary"] == summary and s["description"] == description for s in subtasks):
+                continue
+            subtasks.append({"summary": summary, "description": description})
+            logger.info(f"Parsed subtask: {summary}")
+
         return subtasks
     
     async def generate_prd(self, prompt: str, attachments: List[Dict[str, Any]]) -> str:
@@ -653,9 +675,10 @@ Format the output clearly in markdown."""
         """Generate PRD using Gemini API."""
         async def call_gemini():
             return await asyncio.to_thread(
-                self.client.generate_content,
-                f"{system_prompt}\n\nUser Product Thought: {prompt}",
-                generation_config={"temperature": 0.7, "max_output_tokens": 4096}
+                self.client.models.generate_content,
+                model=self.model,
+                contents=f"{system_prompt}\n\nUser Product Thought: {prompt}",
+                config={"temperature": 0.7, "max_output_tokens": 4096}
             )
         
         response = await self._call_with_retry(call_gemini, timeout=300.0)
@@ -807,9 +830,10 @@ class User(BaseModel):
         """Generate code using Gemini API."""
         async def call_gemini():
             return await asyncio.to_thread(
-                self.client.generate_content,
-                prompt,
-                generation_config={"temperature": temp, "max_output_tokens": max_tokens}
+                self.client.models.generate_content,
+                model=self.model,
+                contents=prompt,
+                config={"temperature": temp, "max_output_tokens": max_tokens}
             )
         
         response = await self._call_with_retry(call_gemini, timeout=timeout)

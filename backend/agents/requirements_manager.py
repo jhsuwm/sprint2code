@@ -4,10 +4,10 @@ from agents.job_manager import job_store
 from agents.skill_registry import SkillRegistry
 
 class RequirementsManager:
-    def __init__(self, job_manager, jira_service, gemini_service, github_service):
+    def __init__(self, job_manager, jira_service, ai_service, github_service):
         self.job_manager = job_manager
         self.jira_service = jira_service
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
         self.github_service = github_service
         self.skill_registry = SkillRegistry()
 
@@ -37,7 +37,7 @@ class RequirementsManager:
             job_store[job_id]["technical_config"] = technical_config
         
         # GitHub Repo & Branch Setup
-        # Identify ALL unique repositories from technical config
+        # Identify ALL unique repositories from skill context
         unique_repos = self._identify_all_repos(job_id, description, technical_config)
         
         if not unique_repos:
@@ -92,7 +92,7 @@ class RequirementsManager:
                     skill_str = ""
             work_plan_context += f"Technical Requirements (Skills):\n{skill_str}"
         
-        work_plan = await self.gemini_service.generate_work_plan(work_plan_context)
+        work_plan = await self.ai_service.generate_work_plan(work_plan_context)
         job_store[job_id]["work_plan"] = work_plan
         
         # CRITICAL: Check if work plan generation failed due to AI unavailability
@@ -107,7 +107,36 @@ class RequirementsManager:
             raise Exception(error_msg)
         
         # Subtasks
-        parsed_subtasks = self.gemini_service.parse_work_plan(work_plan)
+        parsed_subtasks = self.ai_service.parse_work_plan(work_plan)
+        min_subtasks = self._determine_min_subtasks(clean_prd, technical_config)
+
+        # Recovery path: if model produced too few subtasks, request an expanded plan.
+        if len(parsed_subtasks) < min_subtasks:
+            self.job_manager.log(
+                job_id,
+                (
+                    f"⚠️ Work plan too short ({len(parsed_subtasks)} subtasks, expected at least {min_subtasks}). "
+                    "Regenerating expanded work plan."
+                ),
+                "Work Plan Recovery",
+                level="WARNING"
+            )
+            expansion_instruction = (
+                f"\n\nCRITICAL OUTPUT REQUIREMENT:\n"
+                f"- Generate at least {min_subtasks} subtasks.\n"
+                f"- Use strict format for every item:\n"
+                f"  SUBTASK: <short title>\n"
+                f"  Desc: <implementation details>\n"
+                f"  ---\n"
+                f"- Cover backend and frontend completely when both skills are present.\n"
+                f"- Keep each subtask focused and implementation-ready.\n"
+            )
+            expanded_work_plan = await self.ai_service.generate_work_plan(work_plan_context + expansion_instruction)
+            expanded_subtasks = self.ai_service.parse_work_plan(expanded_work_plan)
+            if len(expanded_subtasks) > len(parsed_subtasks):
+                work_plan = expanded_work_plan
+                parsed_subtasks = expanded_subtasks
+                job_store[job_id]["work_plan"] = work_plan
         
         # CRITICAL: Verify that subtasks were actually parsed
         if not parsed_subtasks or len(parsed_subtasks) == 0:
@@ -286,7 +315,7 @@ class RequirementsManager:
         cleaned = []
         for line in lines:
             l_lower = line.lower().strip()
-            if any(l_lower.startswith(k) for k in ['github:', 'config:', 'technical config:', 'tech-config:']): continue
+            if any(l_lower.startswith(k) for k in ['github:', 'skills:', 'skill context:', 'technical skills:']): continue
             cleaned.append(line)
         return '\n'.join(cleaned).strip()
 
@@ -294,3 +323,14 @@ class RequirementsManager:
         ext = filename.lower().split('.')[-1]
         mimes = {'log':'text/plain', 'txt':'text/plain', 'png':'image/png', 'jpg':'image/jpeg', 'pdf':'application/pdf'}
         return mimes.get(ext, 'application/octet-stream')
+
+    def _determine_min_subtasks(self, clean_prd: str, technical_config: Dict[str, Any]) -> int:
+        """Set a practical lower bound to avoid under-scoped plans."""
+        has_frontend = bool((technical_config or {}).get("frontend"))
+        has_backend = bool((technical_config or {}).get("backend"))
+        is_fullstack = has_frontend and has_backend
+        # Longer PRDs need more decomposition; keep floor conservative.
+        prd_len = len(clean_prd or "")
+        if is_fullstack:
+            return 8 if prd_len > 600 else 6
+        return 5 if prd_len > 600 else 4

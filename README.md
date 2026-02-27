@@ -86,7 +86,7 @@ Required environment variables in `.env`:
 - `JIRA_API_TOKEN` - JIRA API token
 - `JWT_SECRET_KEY` - Secret key for JWT token generation (use a strong random string)
 
-**Note:** Google Cloud/Firestore is optional and not required for core functionality. Skills are stored locally in the `/config/skills` folder.
+**Note:** Google Cloud/Firestore is optional and not required for core functionality. Skills are stored locally in the `/skills` folder.
 
 4. Start the backend:
 ```bash
@@ -125,11 +125,11 @@ Frontend will run on `http://localhost:3000`
 
 ### 1. Configure Agent Skills
 
-Create skill folders under `/config/skills`, each with a `SKILL.md` file that declares technical standards and workflow constraints.
+Create skill folders under `/skills`, each with a `SKILL.md` file that declares technical standards and workflow constraints.
 
 **Use the provided examples:**
 ```bash
-ls config/skills
+ls skills
 ```
 
 **Example skill header:**
@@ -264,7 +264,7 @@ Detailed documentation available in `/docs`:
 
 ## 🔧 Configuration Examples
 
-Sample skills are available in `/config/skills`:
+Sample skills are available in `/skills`:
 - `backend-fastapi-standard/SKILL.md` - Backend technical standards
 - `frontend-nextjs-standard/SKILL.md` - Frontend technical standards
 - `fullstack-quality-gate/SKILL.md` - Static-analysis and auto-fix quality gate

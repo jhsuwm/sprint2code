@@ -14,22 +14,13 @@ export default function AutonomousDevDashboard() {
   const [jobStatus, setJobStatus] = useState<any>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState(true);
-  const [showConfigModal, setShowConfigModal] = useState(false);
-  const [configName, setConfigName] = useState('');
-  const [configType, setConfigType] = useState<'frontend' | 'backend' | 'fullstack'>('fullstack');
-  const [configContent, setConfigContent] = useState('');
-  const [savingConfig, setSavingConfig] = useState(false);
-  const [configs, setConfigs] = useState<any[]>([]);
-  const [loadingConfigs, setLoadingConfigs] = useState(false);
-  const [showConfigList, setShowConfigList] = useState(true);
-  const [isEditMode, setIsEditMode] = useState(false);
-  const [selectedConfigs, setSelectedConfigs] = useState<any[]>([]);
-  const [stagedSelections, setStagedSelections] = useState<any[]>([]);
+  const [showSkillsModal, setShowSkillsModal] = useState(false);
+  const [selectedSkills, setSelectedSkills] = useState<any[]>([]);
+  const [localSkills, setLocalSkills] = useState<any[]>([]);
+  const [loadingSkills, setLoadingSkills] = useState(false);
   const [frontendLogs, setFrontendLogs] = useState<string[]>([]);
   const [backendLogs, setBackendLogs] = useState<string[]>([]);
   const [appStatus, setAppStatus] = useState<string | null>(null);
-  const [localConfigFiles, setLocalConfigFiles] = useState<any[]>([]);
-  const [loadingLocalConfigs, setLoadingLocalConfigs] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const frontendLogsEndRef = useRef<HTMLDivElement>(null);
   const backendLogsEndRef = useRef<HTMLDivElement>(null);
@@ -41,11 +32,11 @@ export default function AutonomousDevDashboard() {
   useEffect(() => {
     const savedSpace = localStorage.getItem('selectedSpace');
     const savedEpic = localStorage.getItem('selectedEpic');
-    const savedConfigsStr = localStorage.getItem('selectedConfigs');
+    const savedSkillsStr = localStorage.getItem('selectedSkills');
 
     if (savedSpace) setSelectedSpace(JSON.parse(savedSpace));
     if (savedEpic) setSelectedEpic(JSON.parse(savedEpic));
-    if (savedConfigsStr) setSelectedConfigs(JSON.parse(savedConfigsStr));
+    if (savedSkillsStr) setSelectedSkills(JSON.parse(savedSkillsStr));
   }, []);
 
   const getAuthToken = () => {
@@ -104,10 +95,7 @@ export default function AutonomousDevDashboard() {
         },
         body: JSON.stringify({
           story_id: storyId,
-          skill_names: selectedConfigs.map(c => c.name),
-          config_name: selectedConfigs.find(c => c.type === 'grouped')?.name,
-          frontend_config_name: selectedConfigs.find(c => c.type === 'frontend')?.name,
-          backend_config_name: selectedConfigs.find(c => c.type === 'backend')?.name,
+          skill_names: selectedSkills.map((skill: any) => skill.name),
         })
       });
       if (res.ok) {
@@ -144,68 +132,24 @@ export default function AutonomousDevDashboard() {
     }, 5000);
   };
 
-  const fetchConfigs = async () => {
-    setLoadingConfigs(true);
+  const fetchLocalSkills = async () => {
+    setLoadingSkills(true);
     try {
       const token = getAuthToken();
-      const res = await fetch(`${BACKEND_URL}/autonomous-dev/configs`, {
+      const res = await fetch(`${BACKEND_URL}/autonomous-dev/local-skills`, {
         headers: { 'Authorization': `Bearer ${token}` }
       });
       if (res.ok) {
         const data = await res.json();
-        setConfigs(data);
-        setStagedSelections(selectedConfigs.map(config => config.name));
-      }
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoadingConfigs(false);
-    }
-  };
-
-  const handleSaveConfig = async () => {
-    if (!configName.trim() || !configContent.trim()) {
-      alert('Please provide config name and content');
-      return;
-    }
-
-    const typeToSave = configType === 'fullstack' ? 'grouped' : configType;
-    setSavingConfig(true);
-
-    try {
-      const token = getAuthToken();
-      const payload = {
-        name: configName.trim(),
-        type: typeToSave,
-        content: configContent.trim()
-      };
-
-      const res = await fetch(`${BACKEND_URL}/autonomous-dev/config`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(payload)
-      });
-      
-      if (res.ok) {
-        alert('Config saved successfully!');
-        const newConfig = { name: configName.trim(), type: typeToSave };
-        setSelectedConfigs([newConfig]);
-        setStagedSelections([configName.trim()]);
-        localStorage.setItem('selectedConfigs', JSON.stringify([newConfig]));
-        closeConfigModal();
-        fetchConfigs();
+        setLocalSkills(data);
       } else {
-        const error = await res.json();
-        alert(`Failed to save config: ${error.detail || 'Unknown error'}`);
+        setLocalSkills([]);
       }
     } catch (e) {
       console.error(e);
-      alert('Failed to save config. Please try again.');
+      setLocalSkills([]);
     } finally {
-      setSavingConfig(false);
+      setLoadingSkills(false);
     }
   };
 
@@ -228,118 +172,22 @@ export default function AutonomousDevDashboard() {
     setShowStoryList(false);
   };
 
-  const openConfigModal = async () => {
-    setShowConfigModal(true);
-    setShowConfigList(true);
-    setIsEditMode(false);
-    setStagedSelections(selectedConfigs.map(c => c.name));
-    setConfigName('');
-    setConfigContent('');
-    
-    // Fetch local config files immediately
-    setLoadingLocalConfigs(true);
-    try {
-      const token = getAuthToken();
-      const res = await fetch(`${BACKEND_URL}/autonomous-dev/local-skills`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const files = await res.json();
-        setLocalConfigFiles(files);
-      } else {
-        setLocalConfigFiles([]);
-      }
-    } catch (e) {
-      console.error(e);
-      setLocalConfigFiles([]);
-    } finally {
-      setLoadingLocalConfigs(false);
-    }
+  const openSkillsModal = async () => {
+    setShowSkillsModal(true);
+    await fetchLocalSkills();
   };
 
-  const closeConfigModal = () => {
-    setShowConfigModal(false);
-    setShowConfigList(true);
-    setIsEditMode(false);
-    setStagedSelections(selectedConfigs.map(c => c.name));
-    setConfigName('');
-    setConfigContent('');
+  const closeSkillsModal = () => {
+    setShowSkillsModal(false);
   };
 
-  const handleSelectCheckedConfigs = () => {
-    const newSelected = configs.filter(config => stagedSelections.includes(config.name));
-    setSelectedConfigs(newSelected);
-    localStorage.setItem('selectedConfigs', JSON.stringify(newSelected));
-    closeConfigModal();
-  };
-
-  const handleAddNewConfig = async () => {
-    // Fetch local config files
-    setLoadingLocalConfigs(true);
-    try {
-      const token = getAuthToken();
-      const res = await fetch(`${BACKEND_URL}/autonomous-dev/local-skills`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const files = await res.json();
-        setLocalConfigFiles(files);
-      } else {
-        setLocalConfigFiles([]);
-      }
-    } catch (e) {
-      console.error(e);
-      setLocalConfigFiles([]);
-    } finally {
-      setLoadingLocalConfigs(false);
-    }
-    
-    setStagedSelections([]);
-    setConfigName('');
-    setConfigType('fullstack');
-    setConfigContent('');
-    setIsEditMode(false);
-    setShowConfigList(false);
-  };
-
-  const handleSelectLocalConfigFile = (file: any) => {
-    // Auto-detect type from filename
-    let detectedType: 'frontend' | 'backend' | 'fullstack' = 'fullstack';
-    if (file.type === 'frontend' || file.name.includes('frontend')) {
-      detectedType = 'frontend';
-    } else if (file.type === 'backend' || file.name.includes('backend')) {
-      detectedType = 'backend';
-    }
-    
-    const configType = detectedType === 'fullstack' ? 'grouped' : detectedType;
-    
-    // Create new config object
-    const newConfig = { 
-      name: file.name,
-      type: configType,
-      local_skill: file.name
-    };
-    
-    // Remove any existing config of the same type, then add the new one
-    const updatedConfigs = [
-      ...selectedConfigs.filter(c => c.type !== configType),
-      newConfig
-    ];
-    
-    setSelectedConfigs(updatedConfigs);
-    localStorage.setItem('selectedConfigs', JSON.stringify(updatedConfigs));
-    
-    // Don't close modal - let user select more configs
-    // Show a success message instead
-    alert(`✓ ${file.name} added! You can select more configs or close this dialog.`);
-  };
-
-  const backToConfigList = () => {
-    setShowConfigList(true);
-    setIsEditMode(false);
-    setStagedSelections(selectedConfigs.map(c => c.name));
-    setConfigName('');
-    setConfigContent('');
+  const toggleSkillSelection = (skill: any) => {
+    const exists = selectedSkills.some((s: any) => s.name === skill.name);
+    const next = exists
+      ? selectedSkills.filter((s: any) => s.name !== skill.name)
+      : [...selectedSkills, skill];
+    setSelectedSkills(next);
+    localStorage.setItem('selectedSkills', JSON.stringify(next));
   };
 
   if (!isAuthenticated) return null;
@@ -360,15 +208,15 @@ export default function AutonomousDevDashboard() {
             JIRA Epic
           </button>
           <button 
-            onClick={openConfigModal}
+            onClick={openSkillsModal}
             className="bg-gradient-to-r from-purple-600 to-violet-600 hover:from-purple-700 hover:to-violet-700 text-white px-4 py-1.5 rounded-full text-xs font-semibold transition-all duration-300 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 flex items-center group min-w-[140px] max-w-[280px]"
-            title={selectedConfigs.length > 0 ? `Selected: ${selectedConfigs.map(c => c.name).join(', ')}` : 'Select Agent Skills'}
+            title={selectedSkills.length > 0 ? `Selected: ${selectedSkills.map((s: any) => s.name).join(', ')}` : 'Select Agent Skills'}
           >
             <svg className="w-4 h-4 mr-1.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
             </svg>
             <span className="truncate">
-              {selectedConfigs.length > 0 ? selectedConfigs.map(c => c.name).join(', ') : 'Agent Skills'}
+              {selectedSkills.length > 0 ? selectedSkills.map((s: any) => s.name).join(', ') : 'Agent Skills'}
             </span>
           </button>
         </div>
@@ -381,7 +229,7 @@ export default function AutonomousDevDashboard() {
             onPRDGenerated={handlePRDGenerated} 
             selectedEpic={selectedEpic} 
             selectedSpace={selectedSpace} 
-            selectedConfigs={selectedConfigs}
+            selectedSkills={selectedSkills}
           />
         </div>
         
@@ -526,13 +374,13 @@ export default function AutonomousDevDashboard() {
         </div>
       </main>
 
-      {/* Config Modal - Simplified version */}
-      {showConfigModal && (
+      {/* Skills Modal */}
+      {showSkillsModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center">
           <div className="bg-white w-full max-w-3xl max-h-[90vh] shadow-2xl rounded-2xl overflow-hidden flex flex-col">
             <div className="flex justify-between items-center p-6 border-b">
               <h2 className="text-2xl font-bold">Agent Skills</h2>
-              <button onClick={closeConfigModal} className="text-slate-400 hover:text-slate-600">
+              <button onClick={closeSkillsModal} className="text-slate-400 hover:text-slate-600">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
@@ -541,56 +389,42 @@ export default function AutonomousDevDashboard() {
                 <h3 className="text-lg font-bold text-slate-800 mb-1">Available Skills</h3>
                 <p className="text-sm text-slate-600 mb-4">Click on a skill to toggle selection. Selected skills will be used during code generation and auto-fix.</p>
                 
-                {loadingLocalConfigs ? (
+                {loadingSkills ? (
                   <div className="flex justify-center items-center py-10">
                     <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-purple-600"></div>
                   </div>
-                ) : localConfigFiles.length === 0 ? (
+                ) : localSkills.length === 0 ? (
                   <div className="text-center py-10 text-slate-500 bg-slate-50 rounded-lg border-2 border-dashed border-slate-300">
                     <svg className="w-12 h-12 mx-auto mb-3 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
                     <p className="text-sm font-semibold">No skills found</p>
-                    <p className="text-xs mt-1">Add SKILL.md files under config/skills</p>
+                    <p className="text-xs mt-1">Add SKILL.md files under skills/</p>
                   </div>
                 ) : (
                   <div className="space-y-2 max-h-[500px] overflow-y-auto">
-                    {localConfigFiles.map((file) => {
-                      const isBackend = file.name.includes('backend');
-                      const isFrontend = file.name.includes('frontend');
-                      const configTypeLabel = isBackend ? 'Backend' : isFrontend ? 'Frontend' : 'Full-Stack';
-                      const configType = isBackend ? 'backend' : isFrontend ? 'frontend' : 'grouped';
+                    {localSkills.map((skill) => {
+                      const name = skill.name || '';
+                      const isBackend = name.includes('backend');
+                      const isFrontend = name.includes('frontend');
+                      const skillTypeLabel = isBackend ? 'Backend' : isFrontend ? 'Frontend' : 'Full-Stack';
                       
                       // Check if this file is already selected
-                      const isSelected = selectedConfigs.some(c => c.name === file.name);
+                      const isSelected = selectedSkills.some((s: any) => s.name === skill.name);
                       const baseColorClass = isBackend ? 'border-green-300 bg-green-50' : isFrontend ? 'border-blue-300 bg-blue-50' : 'border-purple-300 bg-purple-50';
                       const selectedColorClass = isBackend ? 'border-green-500 bg-green-100' : isFrontend ? 'border-blue-500 bg-blue-100' : 'border-purple-500 bg-purple-100';
                       const badgeClass = isBackend ? 'bg-green-100 text-green-700' : isFrontend ? 'bg-blue-100 text-blue-700' : 'bg-purple-100 text-purple-700';
                       
                       return (
                         <div
-                          key={file.name}
+                          key={skill.name}
                           className={`w-full p-4 border-2 ${isSelected ? selectedColorClass : baseColorClass} rounded-lg transition-all ${isSelected ? '' : 'hover:shadow-md cursor-pointer'}`}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div 
                               className="flex-1 cursor-pointer"
                               onClick={() => {
-                                if (!isSelected) {
-                                  // Select
-                                  const newConfig = { 
-                                    name: file.name,
-                                    type: configType,
-                                    local_skill: file.name
-                                  };
-                                  // Remove existing config of same type, add new one
-                                  const updatedConfigs = [
-                                    ...selectedConfigs.filter(c => c.type !== configType),
-                                    newConfig
-                                  ];
-                                  setSelectedConfigs(updatedConfigs);
-                                  localStorage.setItem('selectedConfigs', JSON.stringify(updatedConfigs));
-                                }
+                                toggleSkillSelection(skill);
                               }}
                             >
                               <div className="flex items-center gap-2 mb-1">
@@ -603,26 +437,23 @@ export default function AutonomousDevDashboard() {
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                                   </svg>
                                 )}
-                                <span className={`font-semibold ${isSelected ? 'text-slate-900' : 'text-slate-700'}`}>{file.name}</span>
+                                <span className={`font-semibold ${isSelected ? 'text-slate-900' : 'text-slate-700'}`}>{skill.name}</span>
                                 {isSelected && (
                                   <span className="ml-2 px-2 py-0.5 rounded-full text-xs font-bold bg-green-600 text-white">
                                     SELECTED
                                   </span>
                                 )}
                               </div>
-                              <p className="text-xs text-slate-500 ml-7">{file.path}</p>
+                              <p className="text-xs text-slate-500 ml-7">{skill.path}</p>
                             </div>
                             <div className="flex items-center gap-2 shrink-0">
                               <span className={`px-2 py-1 rounded-full text-xs font-semibold ${badgeClass}`}>
-                                {configTypeLabel}
+                                {skillTypeLabel}
                               </span>
                               {isSelected && (
                                 <button
                                   onClick={() => {
-                                    // Deselect
-                                    const updatedConfigs = selectedConfigs.filter(c => c.name !== file.name);
-                                    setSelectedConfigs(updatedConfigs);
-                                    localStorage.setItem('selectedConfigs', JSON.stringify(updatedConfigs));
+                                    toggleSkillSelection(skill);
                                   }}
                                   className="p-1.5 hover:bg-red-100 rounded-lg transition-colors group"
                                   title="Remove this skill"

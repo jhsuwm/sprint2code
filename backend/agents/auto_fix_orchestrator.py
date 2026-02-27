@@ -14,20 +14,20 @@ from agents.deployment_fixer import DeploymentFixer
 class AutoFixOrchestrator:
     """Main orchestrator that detects errors and assigns work to parallel auto-fix agents"""
     
-    def __init__(self, job_manager, gemini_service, github_service, jira_service, num_workers: int = 2):
+    def __init__(self, job_manager, ai_service, github_service, jira_service, num_workers: int = 2):
         self.job_manager = job_manager
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
         self.github_service = github_service
         self.jira_service = jira_service
         
         # Create worker pool
         self.workers = [
-            AutoFixWorker(i+1, job_manager, gemini_service, github_service, jira_service)
+            AutoFixWorker(i+1, job_manager, ai_service, github_service, jira_service)
             for i in range(num_workers)
         ]
         
         # Shared fixer for parsing and validation
-        self.fixer = DeploymentFixer(job_manager, gemini_service, github_service, jira_service)
+        self.fixer = DeploymentFixer(job_manager, ai_service, github_service, jira_service)
         
         # CRITICAL FIX: Use separate queues per worker to avoid routing deadlocks
         self.worker_queues = {worker.worker_id: asyncio.Queue() for worker in self.workers}

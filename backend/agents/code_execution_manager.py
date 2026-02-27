@@ -5,9 +5,9 @@ from log_config import logger, error
 from agents.job_manager import job_store
 
 class CodeExecutionManager:
-    def __init__(self, job_manager, gemini_service, github_service, jira_service):
+    def __init__(self, job_manager, ai_service, github_service, jira_service):
         self.job_manager = job_manager
-        self.gemini_service = gemini_service
+        self.ai_service = ai_service
         self.github_service = github_service
         self.jira_service = jira_service
 
@@ -20,8 +20,8 @@ class CodeExecutionManager:
             if isinstance(technical_config, dict):
                 config_str = technical_config.get("full") or f"Frontend:\n{technical_config.get('frontend')}\n\nBackend:\n{technical_config.get('backend')}"
                 
-            code_context = f"Technical Configuration:\n{config_str}" if config_str else ""
-            await self.gemini_service.generate_code("Implement story requirements", code_context, clean_prd, attachments_data)
+            code_context = f"Skills Context:\n{config_str}" if config_str else ""
+            await self.ai_service.generate_code("Implement story requirements", code_context, clean_prd, attachments_data)
             return
 
         for i, subtask in enumerate(subtasks):
@@ -38,18 +38,18 @@ class CodeExecutionManager:
             # Determine correct GitHub repo for this task type
             github_repo = self._determine_github_repo(job_id, technical_config, task_type)
             
-            # CONTEXT OPTIMIZATION: Use strictly filtered config and specialized context
+            # CONTEXT OPTIMIZATION: Use strictly filtered skill context and specialized context
             code_context = f"JIRA Story Product Requirements (PRD):\n{clean_prd}\n\n"
             if filtered_config:
-                code_context += f"TECHNICAL REQUIREMENTS ({task_type.upper()}):\n{filtered_config}"
+                code_context += f"SKILL REQUIREMENTS ({task_type.upper()}):\n{filtered_config}"
             elif isinstance(technical_config, str):
-                code_context += f"TECHNICAL REQUIREMENTS:\n{technical_config}"
+                code_context += f"SKILL REQUIREMENTS:\n{technical_config}"
 
             self.job_manager.log(job_id, f"Processing {task_type} subtask {i+1}/{len(subtasks)}: {subtask_key}", f"Coding: {subtask_key}")
             
             # Log technical requirement source but NOT the whole content
             if filtered_config:
-                logger.info(f"⚙️ [Job {job_id}] Using filtered technical config for {task_type} ({len(filtered_config)} characters)")
+                logger.info(f"⚙️ [Job {job_id}] Using filtered skill context for {task_type} ({len(filtered_config)} characters)")
             
             # CRITICAL DEBUG: Log that we're about to call AI
             logger.info(f"🤖 [Job {job_id}] About to generate code for subtask {subtask_key} using AI...")
@@ -149,11 +149,11 @@ class CodeExecutionManager:
         max_retries = 10; retry_count = 0
         while retry_count < max_retries:
             try:
-                result = await self.gemini_service.generate_code(desc, code_context, clean_prd, attachments, repo_files=repo_files)
+                result = await self.ai_service.generate_code(desc, code_context, clean_prd, attachments, repo_files=repo_files)
                 code = result[0] if isinstance(result, tuple) else result
                 reason = result[1] if isinstance(result, tuple) else 'STOP'
                 
-                parsed_files = self.gemini_service.parse_generated_code(code)
+                parsed_files = self.ai_service.parse_generated_code(code)
                 real_files = [f for f in parsed_files if not f['file_path'].startswith('generated_code.') and not f['file_path'].startswith('error.')]
                 
                 # Retry on MAX_TOKENS, RECITATION, or parsing failures
@@ -197,8 +197,8 @@ class CodeExecutionManager:
         """
         try:
             # Use the vendor-agnostic generate_code API (works with OpenRouter, Gemini, etc.)
-            # self.gemini_service is an AIService instance that routes to the configured AI_VENDOR.
-            result = await self.gemini_service.generate_code(
+            # self.ai_service is an AIService instance that routes to the configured AI_VENDOR.
+            result = await self.ai_service.generate_code(
                 task_description=prompt,
                 context="",
                 story_context="",

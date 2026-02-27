@@ -20,10 +20,10 @@ interface ChatWindowProps {
   onPRDGenerated: (prd: string, attachments: File[], projectKey?: string, epicKey?: string, storyId?: string) => void;
   selectedEpic?: any;
   selectedSpace?: any;
-  selectedConfigs?: any[];
+  selectedSkills?: any[];
 }
 
-export default function ChatWindow({ onPRDGenerated, selectedEpic, selectedSpace, selectedConfigs }: ChatWindowProps) {
+export default function ChatWindow({ onPRDGenerated, selectedEpic, selectedSpace, selectedSkills }: ChatWindowProps) {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
@@ -177,7 +177,7 @@ export default function ChatWindow({ onPRDGenerated, selectedEpic, selectedSpace
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
         {/* Initial Instructions - Stay Fixed */}
         <div className="p-4 space-y-4 shrink-0 border-b border-slate-700 bg-slate-900">
-            {selectedConfigs && selectedConfigs.length === 0 ? (
+            {selectedSkills && selectedSkills.length === 0 ? (
                 <div className="bg-purple-900/30 text-purple-300 p-3 rounded-lg text-xs border border-purple-800 shadow-sm flex items-start gap-3 animate-pulse">
                     <svg className="w-5 h-5 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -191,8 +191,8 @@ export default function ChatWindow({ onPRDGenerated, selectedEpic, selectedSpace
                     </svg>
                     <div>
                         <p className="font-semibold text-purple-200">Skill Context Active:</p>
-                        {selectedConfigs?.map(config => (
-                            <p key={config.name} className="mt-1 opacity-90">Using <strong>{config.name} ({config.type === 'frontend' ? 'Frontend' : config.type === 'backend' ? 'Backend' : 'Grouped'})</strong> for standards.</p>
+                        {selectedSkills?.map(skill => (
+                            <p key={skill.name} className="mt-1 opacity-90">Using <strong>{skill.name}</strong> for standards.</p>
                         ))}
                     </div>
                 </div>
