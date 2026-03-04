@@ -1359,6 +1359,16 @@ class DeploymentFixer:
     def _parse_all_errors(self, errors: List[str], repo_dir: str) -> Dict[str, Dict]:
         """Parse ALL error types with proper path normalization and CROSS-FILE dependency detection"""
         files = {}
+
+        def _safe_read(local_path: str) -> str:
+            """Read file content only when path is a regular file."""
+            try:
+                if os.path.isfile(local_path):
+                    with open(local_path, 'r', encoding='utf-8') as f:
+                        return f.read()
+            except Exception:
+                pass
+            return ""
         
         for error in errors:
             # Missing mandatory frontend configuration file (e.g., next.config.js, tsconfig.json)
@@ -1372,10 +1382,7 @@ class DeploymentFixer:
                 file_path = f"frontend/{filename}"
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(
                     f"File does not exist - CREATE IT: {filename} ({description})"
@@ -1390,10 +1397,7 @@ class DeploymentFixer:
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(error)
                 continue
@@ -1407,10 +1411,7 @@ class DeploymentFixer:
                 file_path = "backend/requirements.txt"
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content, 'packages': set()}
                 files[file_path]['missing'].append(
                     f"Strip invalid pip line: '{invalid_pip_match.group(1)}'"
@@ -1441,10 +1442,7 @@ class DeploymentFixer:
                 file_path = "frontend/package.json"
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content, 'packages': set()}
                 files[file_path]['missing'].append(f"Fix JSON syntax: {details}")
                 continue
@@ -1456,10 +1454,7 @@ class DeploymentFixer:
                 file_path = "frontend/app/page.tsx"
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(
                     "Missing mandatory routing directory (app/ or pages/). CREATE 'frontend/app/page.tsx' with a basic Next.js page component to establish the App Router."
@@ -1471,10 +1466,7 @@ class DeploymentFixer:
                 file_path = "frontend/package.json"
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content, 'packages': set()}
                 files[file_path]['missing'].append("Missing 'node_modules': Forces fresh dependency installation.")
                 continue
@@ -1496,10 +1488,7 @@ class DeploymentFixer:
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content, 'dependent_files': []}
                 
                 # Track which items are missing
@@ -1541,10 +1530,7 @@ class DeploymentFixer:
                     file_path = "backend/requirements.txt"
                     if file_path not in files:
                         local = os.path.join(repo_dir, file_path)
-                        content = ''
-                        if os.path.exists(local):
-                            with open(local, 'r') as f:
-                                content = f.read()
+                        content = _safe_read(local)
                         files[file_path] = {'missing': [], 'content': content, 'packages': set()}
                     # Map to correct package name
                     pkg_name = {
@@ -1574,13 +1560,18 @@ class DeploymentFixer:
                 # It's a local file that needs to be created
                 file_path = f"backend/{missing_file}"
                 file_path = self._normalize_file_path(file_path)
+                # Avoid creating a top-level module file that shadows an existing package directory.
+                # Example: creating backend/routes.py breaks "from routes import auth_routes"
+                # when backend/routes/ already exists.
+                if file_path.startswith("backend/") and file_path.endswith(".py"):
+                    module_name = os.path.basename(file_path)[:-3]
+                    package_dir = os.path.join(repo_dir, "backend", module_name)
+                    if os.path.isdir(package_dir):
+                        file_path = f"backend/{module_name}/__init__.py"
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(f"File does not exist - CREATE IT with module: {module_trying_to_import}")
                 continue
@@ -1609,10 +1600,7 @@ class DeploymentFixer:
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(f"Fix import: Change 'from backend.{wrong_import}' to 'from {correct_import}'")
                 continue
@@ -1630,10 +1618,7 @@ class DeploymentFixer:
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(f"Fix import: Change 'from backend.{wrong_import}' to 'from {correct_import}'")
                 continue
@@ -1654,10 +1639,7 @@ class DeploymentFixer:
                     dep_path = self._normalize_file_path(dep_path)
                     if dep_path not in files:
                         local = os.path.join(repo_dir, dep_path)
-                        content = ''
-                        if os.path.exists(local):
-                            with open(local, 'r') as f:
-                                content = f.read()
+                        content = _safe_read(local)
                         files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                     files[dep_path]['missing'].append(f"Missing export: {missing_export}")
                     files[dep_path]['dependent_files'].append(importer_path)
@@ -1672,10 +1654,7 @@ class DeploymentFixer:
                         dep_path = self._normalize_file_path(dep_path)
                         if dep_path not in files:
                             local = os.path.join(repo_dir, dep_path)
-                            content = ''
-                            if os.path.exists(local):
-                                with open(local, 'r') as f:
-                                    content = f.read()
+                            content = _safe_read(local)
                             files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                         files[dep_path]['missing'].append(f"Missing local module for import: {missing_module}")
                         files[dep_path]['dependent_files'].append(importer_path)
@@ -1695,10 +1674,7 @@ class DeploymentFixer:
                     file_path = "frontend/package.json"
                     if file_path not in files:
                         local = os.path.join(repo_dir, file_path)
-                        content = ''
-                        if os.path.exists(local):
-                            with open(local, 'r') as f:
-                                content = f.read()
+                        content = _safe_read(local)
                         files[file_path] = {'missing': [], 'content': content, 'packages': set()}
                     files[file_path]['packages'].add(pkg)
                     continue
@@ -1710,10 +1686,7 @@ class DeploymentFixer:
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
-                    content = ''
-                    if os.path.exists(local):
-                        with open(local, 'r') as f:
-                            content = f.read()
+                    content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(error)
         
@@ -1933,6 +1906,13 @@ class DeploymentFixer:
         # Deterministic syntax cleanup for common JSX inline-comment breakage (TS1005).
         if file_path.endswith(('.tsx', '.jsx')) and any(("1005" in err) or ("'...' expected" in err) for err in missing_items):
             return True
+        # Deterministic fix for auth page/component prop contract drift:
+        # Type '{}' is missing required FormProps when rendering <LoginForm /> etc.
+        if file_path.endswith(('.tsx', '.jsx')) and any(
+            ("Type '{}' is missing the following properties from type" in err and "FormProps" in err)
+            for err in missing_items
+        ):
+            return True
         if '/types/' in file_path and file_path.endswith('.ts'):
             # For missing exports in shared type files, deterministic export stubs are safer than repeated AI loops.
             if any('Missing export:' in err or 'not found in' in err for err in missing_items):
@@ -1972,6 +1952,11 @@ class DeploymentFixer:
                 return await self._fix_test_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.tsx', '.jsx')) and any(("1005" in str(err)) or ("'...' expected" in str(err)) for err in file_info.get('missing', [])):
                 return await self._fix_jsx_inline_comment_syntax(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.tsx', '.jsx')) and any(
+                ("Type '{}' is missing the following properties from type" in str(err) and "FormProps" in str(err))
+                for err in file_info.get('missing', [])
+            ):
+                return await self._fix_auth_page_missing_form_props(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif '/types/' in file_path and file_path.endswith('.ts'):
                 return await self._fix_type_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for "from backend.X" errors
@@ -1979,6 +1964,10 @@ class DeploymentFixer:
                 return await self._fix_backend_prefix(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for redundant types
             elif file_path.endswith(('.ts', '.tsx')) and any(("is not assignable to parameter of type" in str(err)) or ("Type '" in str(err) and "' is not assignable to type '" in str(err)) for err in file_info.get('missing', [])):
+                # First try deterministic auth contract fix (common login page drift).
+                auth_fixed = await self._fix_frontend_auth_contract(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+                if auth_fixed:
+                    return True
                 return await self._fix_redundant_types(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             return False
         except Exception as e:
@@ -2098,6 +2087,7 @@ class DeploymentFixer:
         local = os.path.join(repo_dir, file_path)
         original_content = file_info.get('content', '')
         content = original_content
+        is_model_file = '/models/' in file_path.replace("\\", "/")
 
         # CRITICAL: Strip malformed lines that break pip install.
         # AI-generated requirements.txt files sometimes include:
@@ -2458,29 +2448,66 @@ class DeploymentFixer:
     
     async def _fix_backend_model(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add missing classes"""
-        missing = [m for m in file_info.get('missing', []) if isinstance(m, str) and not m.startswith('Property')]
+        missing: List[str] = []
+        for item in file_info.get('missing', []):
+            if not isinstance(item, str):
+                continue
+            if item.startswith('Property'):
+                continue
+            # Preferred parser for import-resolution messages.
+            export_match = re.search(r"Missing export:\s*([A-Za-z_][A-Za-z0-9_]*)", item)
+            if export_match:
+                name = export_match.group(1).strip()
+                if name not in missing:
+                    missing.append(name)
+                continue
+            # Fallback: accept bare identifier only.
+            candidate = item.strip()
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", candidate):
+                if candidate not in missing:
+                    missing.append(candidate)
         if not missing:
             return False
         
         local = os.path.join(repo_dir, file_path)
         content = file_info.get('content', '')
         
-        if len(content) < 100:
+        if not content.strip():
             content = "from pydantic import BaseModel\n\n"
-            for item in missing:
-                content += f"class {item.strip()}(BaseModel):\n    pass\n\n"
-        else:
-            # Check for existing imports
-            if "from pydantic import" not in content and "import pydantic" not in content:
-                content = "from pydantic import BaseModel\n" + content
-                
-            for item in missing:
-                # Use regex for more robust check of existing class definition
-                if not re.search(rf"class\s+{item.strip()}\b", content):
-                    # Ensure there's a newline before the new class
-                    if not content.endswith("\n\n"):
-                        content += "\n" if content.endswith("\n") else "\n\n"
-                    content += f"class {item.strip()}(BaseModel):\n    pass\n"
+
+        # Ensure BaseModel is available in this file.
+        if "from pydantic import" not in content and "import pydantic" not in content:
+            content = "from pydantic import BaseModel\n" + content
+        elif "from pydantic import" in content and "BaseModel" not in content:
+            content = re.sub(
+                r"from pydantic import ([^\n]+)",
+                lambda m: (
+                    f"from pydantic import {m.group(1)}, BaseModel"
+                    if "BaseModel" not in m.group(1) else m.group(0)
+                ),
+                content,
+                count=1
+            )
+            
+        for item in missing:
+            # Use regex for more robust check of existing class definition
+            if not re.search(rf"class\s+{item.strip()}\b", content):
+                # Ensure there's a newline before the new class
+                if not content.endswith("\n\n"):
+                    content += "\n" if content.endswith("\n") else "\n\n"
+                content += f"class {item.strip()}(BaseModel):\n    pass\n"
+
+        # Guardrail: never commit syntactically invalid Python from programmatic fixes.
+        try:
+            compile(content, local, 'exec')
+        except SyntaxError as e:
+            self._safe_log(
+                job_id,
+                f"❌ Rejected invalid model fix for {file_path}: syntax error at line {e.lineno} ({e.msg})",
+                "Programmatic Export Fix",
+                level="WARNING"
+            )
+            return False
         
         with open(local, 'w') as f:
             f.write(content)
@@ -2677,8 +2704,145 @@ class DeploymentFixer:
         
         return False
 
+    async def _fix_frontend_auth_contract(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix common login-page contract drift between auth/api types and API response shape."""
+        if not file_path.endswith(('.ts', '.tsx', '.js', '.jsx')):
+            return False
+
+        missing_errors = [str(err) for err in file_info.get('missing', [])]
+        if not missing_errors:
+            return False
+        missing_blob = "\n".join(missing_errors)
+        has_login_request_mismatch = ("LoginRequest" in missing_blob and "types/auth" in missing_blob and "types/api" in missing_blob)
+        has_auth_response_prop_mismatch = ("AuthResponse" in missing_blob and ("success" in missing_blob or "message" in missing_blob))
+
+        if not (has_login_request_mismatch or has_auth_response_prop_mismatch):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original_content = content
+
+        # Align LoginRequest source with the login() API function contract.
+        content = re.sub(
+            r"import\s+(type\s+)?\{\s*LoginRequest\s*\}\s+from\s+['\"]([^'\"]*types/auth[^'\"]*)['\"];?",
+            lambda m: f"import {m.group(1) or ''}{{ LoginRequest }} from '{m.group(2).replace('types/auth', 'types/api')}';",
+            content
+        )
+
+        # login() returns AuthResponse (token/user), not ApiResponse wrapper.
+        content = re.sub(r"\bresponse\.success\b", "Boolean(response?.token)", content)
+        content = re.sub(
+            r"setError\(\s*response\.message\s*\|\|\s*(['\"][^'\"]*['\"])\s*\);",
+            r"setError(\1);",
+            content
+        )
+
+        if content == original_content:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self._safe_log(
+            job_id,
+            f"🧹 Orchestrator: Aligned auth contract usage in {file_path} (LoginRequest/AuthResponse)",
+            "Programmatic Fix"
+        )
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_auth_page_missing_form_props(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Patch auth pages that render form components without required props."""
+        if not file_path.endswith(('.tsx', '.jsx')):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original_content = content
+        changed = False
+
+        if re.search(r"<LoginForm\s*/>", content):
+            if "const _orionNoopLoginSubmit" not in content:
+                insert_at = content.find("return ")
+                if insert_at != -1:
+                    helper = (
+                        "const _orionNoopLoginSubmit = async (_payload: unknown) => {\n"
+                        "  return;\n"
+                        "};\n\n"
+                    )
+                    content = content[:insert_at] + helper + content[insert_at:]
+            content = re.sub(
+                r"<LoginForm\s*/>",
+                "<LoginForm onSubmit={_orionNoopLoginSubmit} isLoading={false} error={null} />",
+                content
+            )
+            changed = True
+
+        if re.search(r"<ForgotPasswordForm\s*/>", content):
+            if "const _orionNoopForgotSubmit" not in content:
+                insert_at = content.find("return ")
+                if insert_at != -1:
+                    helper = (
+                        "const _orionNoopForgotSubmit = async (_payload: unknown) => {\n"
+                        "  return;\n"
+                        "};\n\n"
+                    )
+                    content = content[:insert_at] + helper + content[insert_at:]
+            content = re.sub(
+                r"<ForgotPasswordForm\s*/>",
+                "<ForgotPasswordForm onSubmit={_orionNoopForgotSubmit} isLoading={false} error={null} successMessage={null} />",
+                content
+            )
+            changed = True
+
+        if not changed or content == original_content:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self._safe_log(
+            job_id,
+            f"🧹 Orchestrator: Added required auth form props in {file_path}",
+            "Programmatic Fix"
+        )
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     async def _create_missing_backend_module(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Create a missing backend module file reported by static analysis."""
+        # If a same-named package directory exists, create/repair package __init__.py
+        # instead of creating a shadowing top-level module file.
+        if file_path.startswith("backend/") and file_path.endswith(".py"):
+            module_name = os.path.basename(file_path)[:-3]
+            package_dir = os.path.join(repo_dir, "backend", module_name)
+            if os.path.isdir(package_dir):
+                init_path = f"backend/{module_name}/__init__.py"
+                local_init = os.path.join(repo_dir, init_path)
+                if not os.path.exists(local_init):
+                    os.makedirs(os.path.dirname(local_init), exist_ok=True)
+                    content = (
+                        '"""Auto-generated package initializer for unresolved package import."""\n'
+                        f"# Package: {module_name}\n"
+                        "\n"
+                    )
+                    with open(local_init, 'w', encoding='utf-8') as f:
+                        f.write(content)
+                    self._safe_log(job_id, f"✅ Created package __init__.py shim: {init_path}", "Programmatic Create")
+                    return await self._commit_programmatic_fix(job_id, init_path, content, github_repo, github_branch)
+                return False
+
         local = os.path.join(repo_dir, file_path)
         if os.path.exists(local):
             return False
@@ -2710,6 +2874,7 @@ class DeploymentFixer:
         """
         local = os.path.join(repo_dir, file_path)
         original_content = file_info.get('content', '')
+        is_model_file = '/models/' in file_path.replace("\\", "/")
         if not original_content and os.path.exists(local):
             with open(local, 'r', encoding='utf-8') as f:
                 original_content = f.read()
@@ -2807,6 +2972,25 @@ class DeploymentFixer:
 
             if name in KNOWN_STUBS:
                 stub = KNOWN_STUBS[name]
+            elif is_model_file:
+                # Missing exports in model modules should be model classes, not functions.
+                if "from pydantic import" not in content and "import pydantic" not in content:
+                    content = ("from pydantic import BaseModel\n\n" + content).lstrip()
+                elif "from pydantic import" in content and "BaseModel" not in content:
+                    content = re.sub(
+                        r"from pydantic import ([^\n]+)",
+                        lambda m: (
+                            f"from pydantic import {m.group(1)}, BaseModel"
+                            if "BaseModel" not in m.group(1) else m.group(0)
+                        ),
+                        content,
+                        count=1
+                    )
+                stub = (
+                    f"\nclass {name}(BaseModel):\n"
+                    f"    \"\"\"Auto-generated model stub for: {name}\"\"\"\n"
+                    f"    pass\n"
+                )
             else:
                 # Generic async function stub for unknown names
                 stub = (
@@ -2824,6 +3008,16 @@ class DeploymentFixer:
             return False
 
         os.makedirs(os.path.dirname(local), exist_ok=True)
+        try:
+            compile(content, local, 'exec')
+        except SyntaxError as e:
+            self._safe_log(
+                job_id,
+                f"❌ Rejected invalid Python export fix for {file_path}: line {e.lineno} ({e.msg})",
+                "Programmatic Export Fix",
+                level="WARNING"
+            )
+            return False
         with open(local, 'w', encoding='utf-8') as f:
             f.write(content)
 

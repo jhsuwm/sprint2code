@@ -359,11 +359,24 @@ class DeploymentValidator:
                     if not line or 'Found' in line: continue
                     if '):' in line and 'error TS' in line:
                         try:
-                            file_and_pos = line.split('):')[0]
-                            file_path = file_and_pos.split('(')[0]
-                            position = file_and_pos.split('(')[1] if '(' in file_and_pos else 'unknown'
-                            error_msg = line.split('error TS')[1] if 'error TS' in line else line
-                            errors.append(f"TypeScript error in '{file_path}' at {position}: {error_msg.strip()}")
+                            # Robust parse for paths that legitimately contain parentheses,
+                            # e.g. Next.js route groups: app/(dashboard)/page.tsx
+                            m = re.match(
+                                r"^(?P<file>.+)\((?P<line>\d+),(?P<col>\d+)\):\s*error\s*TS(?P<code>\d+):\s*(?P<msg>.+)$",
+                                line
+                            )
+                            if m:
+                                file_path = m.group('file').strip()
+                                position = f"{m.group('line')},{m.group('col')}"
+                                error_msg = f"{m.group('code')}: {m.group('msg').strip()}"
+                                errors.append(f"TypeScript error in '{file_path}' at {position}: {error_msg}")
+                            else:
+                                # Fallback for unexpected tsc formats
+                                file_and_pos = line.split('):')[0]
+                                file_path = file_and_pos.rsplit('(', 1)[0]
+                                position = file_and_pos.rsplit('(', 1)[1] if '(' in file_and_pos else 'unknown'
+                                error_msg = line.split('error TS', 1)[1] if 'error TS' in line else line
+                                errors.append(f"TypeScript error in '{file_path}' at {position}: {error_msg.strip()}")
                         except Exception:
                             errors.append(f"TypeScript error: {line}")
             
@@ -522,7 +535,14 @@ class DeploymentValidator:
                     if 'EmailStr' in content and not ('email-validator' in installed_packages or 'pydantic[email]' in installed_packages):
                         errors.append("Missing dependency: 'email-validator' is required when using pydantic.EmailStr. Add 'email-validator' to requirements.txt")
 
-                    tree = ast.parse(content)
+                    try:
+                        tree = ast.parse(content)
+                    except SyntaxError as syn_err:
+                        errors.append(
+                            f"SyntaxError in '{module_name}.py' at line {syn_err.lineno}: {syn_err.msg}"
+                        )
+                        continue
+
                     for node in ast.walk(tree):
                         imported_modules = []
                         if isinstance(node, ast.Import):
@@ -569,7 +589,8 @@ class DeploymentValidator:
                             )
                             
                             if not is_third_party:
-                                # This should be a local import - check if file exists
+                                # This should be a local import - check if file/module or package exists.
+                                module_is_package = any(m.startswith(f"{node.module}.") for m in module_to_file)
                                 if node.module in module_to_file:
                                     # File exists - check if imported names exist in it
                                     target_file = module_to_file[node.module]
@@ -579,9 +600,22 @@ class DeploymentValidator:
                                             if alias.name == '*' or f"{node.module}.{alias.name}" in module_to_file: continue
                                             if not re.search(rf"(class|def)\s+{alias.name}\b|{alias.name}\s*=", target_content):
                                                 errors.append(f"ImportError in '{module_name}.py': '{alias.name}' not found in '{node.module}.py'")
+                                elif module_is_package:
+                                    # Package import (e.g. "from routes import auth_routes"):
+                                    # accept members that are existing submodules under that package.
+                                    for alias in node.names:
+                                        if alias.name == '*':
+                                            continue
+                                        if f"{node.module}.{alias.name}" in module_to_file:
+                                            continue
+                                        errors.append(
+                                            f"ImportError in '{module_name}.py': '{alias.name}' not found in package '{node.module}'"
+                                        )
                                 else:
                                     # CRITICAL: File doesn't exist but is being imported!
                                     expected_file_path = node.module.replace('.', '/') + '.py'
                                     errors.append(f"ImportError in '{module_name}.py': Cannot import from '{node.module}' - file '{expected_file_path}' does not exist")
-            except Exception: continue
+            except Exception:
+                continue
+
         return errors

@@ -68,29 +68,7 @@ class RequirementsManager:
             work_plan_context += f"Existing Project Files:\n" + "\n".join(file_list[:100]) + ("\n...(truncated)" if len(file_list) > 100 else "") + "\n\n"
         
         if technical_config:
-            # Assemble skill content for the work plan prompt
-            skill_str = technical_config.get("full")
-            if not skill_str:
-                has_frontend = bool(technical_config.get("frontend"))
-                has_backend = bool(technical_config.get("backend"))
-
-                if has_frontend and has_backend:
-                    skill_str = "⚠️ FULL-STACK APPLICATION - YOU MUST GENERATE WORK PLAN FOR BOTH BACKEND AND FRONTEND\n\n"
-                    skill_str += "=" * 80 + "\n"
-                    skill_str += "BACKEND SKILL REQUIREMENTS:\n"
-                    skill_str += "=" * 80 + "\n"
-                    skill_str += technical_config['backend'] + "\n\n"
-                    skill_str += "=" * 80 + "\n"
-                    skill_str += "FRONTEND SKILL REQUIREMENTS:\n"
-                    skill_str += "=" * 80 + "\n"
-                    skill_str += technical_config['frontend'] + "\n"
-                elif has_frontend:
-                    skill_str = f"Frontend Skills:\n{technical_config['frontend']}\n"
-                elif has_backend:
-                    skill_str = f"Backend Skills:\n{technical_config['backend']}\n"
-                else:
-                    skill_str = ""
-            work_plan_context += f"Technical Requirements (Skills):\n{skill_str}"
+            work_plan_context += self._build_skill_requirements_context(technical_config)
         
         work_plan = await self.ai_service.generate_work_plan(work_plan_context)
         job_store[job_id]["work_plan"] = work_plan
@@ -109,34 +87,94 @@ class RequirementsManager:
         # Subtasks
         parsed_subtasks = self.ai_service.parse_work_plan(work_plan)
         min_subtasks = self._determine_min_subtasks(clean_prd, technical_config)
+        missing_coverage = self._detect_missing_skill_coverage(parsed_subtasks, technical_config)
 
-        # Recovery path: if model produced too few subtasks, request an expanded plan.
+        # Recovery path: if model produced too few subtasks, retry and enforce the minimum.
+        if len(parsed_subtasks) < min_subtasks or missing_coverage:
+            max_regeneration_attempts = 2
+            best_work_plan = work_plan
+            best_subtasks = parsed_subtasks
+            best_missing_coverage = missing_coverage
+
+            for attempt in range(1, max_regeneration_attempts + 1):
+                if best_missing_coverage:
+                    missing_labels = ", ".join(best_missing_coverage)
+                    recovery_reason = (
+                        f"⚠️ Work plan missing coverage for selected skill domains: {missing_labels}. "
+                        f"Regenerating expanded work plan (attempt {attempt}/{max_regeneration_attempts})."
+                    )
+                else:
+                    recovery_reason = (
+                        f"⚠️ Work plan too short ({len(best_subtasks)} subtasks, expected at least {min_subtasks}). "
+                        f"Regenerating expanded work plan (attempt {attempt}/{max_regeneration_attempts})."
+                    )
+                self.job_manager.log(
+                    job_id,
+                    recovery_reason,
+                    "Work Plan Recovery",
+                    level="WARNING"
+                )
+                expansion_instruction = (
+                    f"\n\nCRITICAL OUTPUT REQUIREMENT:\n"
+                    f"- Generate at least {min_subtasks} subtasks.\n"
+                    f"- Use strict format for every item:\n"
+                    f"  SUBTASK: <short title>\n"
+                    f"  Desc: <implementation details>\n"
+                    f"  ---\n"
+                    f"- Cover backend and frontend completely when both skills are present.\n"
+                    f"- Keep each subtask focused and implementation-ready.\n"
+                    f"- Avoid combining the full implementation into one broad subtask.\n"
+                )
+                if best_missing_coverage:
+                    expansion_instruction += (
+                        "- Mandatory skill coverage:\n"
+                        + "".join([f"  - Include explicit subtasks for: {domain}.\n" for domain in best_missing_coverage])
+                    )
+                candidate_work_plan = await self.ai_service.generate_work_plan(work_plan_context + expansion_instruction)
+                candidate_subtasks = self.ai_service.parse_work_plan(candidate_work_plan)
+                candidate_missing_coverage = self._detect_missing_skill_coverage(candidate_subtasks, technical_config)
+
+                candidate_is_better = False
+                if len(candidate_missing_coverage) < len(best_missing_coverage):
+                    candidate_is_better = True
+                elif len(candidate_missing_coverage) == len(best_missing_coverage) and len(candidate_subtasks) > len(best_subtasks):
+                    candidate_is_better = True
+
+                if candidate_is_better:
+                    best_work_plan = candidate_work_plan
+                    best_subtasks = candidate_subtasks
+                    best_missing_coverage = candidate_missing_coverage
+
+                if len(best_subtasks) >= min_subtasks and not best_missing_coverage:
+                    break
+
+            work_plan = best_work_plan
+            parsed_subtasks = best_subtasks
+            missing_coverage = best_missing_coverage
+            job_store[job_id]["work_plan"] = work_plan
+
+        # CRITICAL: Reject under-scoped plans to prevent incomplete code generation.
         if len(parsed_subtasks) < min_subtasks:
-            self.job_manager.log(
-                job_id,
-                (
-                    f"⚠️ Work plan too short ({len(parsed_subtasks)} subtasks, expected at least {min_subtasks}). "
-                    "Regenerating expanded work plan."
-                ),
-                "Work Plan Recovery",
-                level="WARNING"
+            error_msg = (
+                f"🚫 PIPELINE ABORTED: Work plan contains only {len(parsed_subtasks)} subtasks, "
+                f"but at least {min_subtasks} are required for this story. "
+                "The AI response is under-scoped, so code generation was stopped to avoid incomplete output. "
+                "Please retry after AI service stabilizes."
             )
-            expansion_instruction = (
-                f"\n\nCRITICAL OUTPUT REQUIREMENT:\n"
-                f"- Generate at least {min_subtasks} subtasks.\n"
-                f"- Use strict format for every item:\n"
-                f"  SUBTASK: <short title>\n"
-                f"  Desc: <implementation details>\n"
-                f"  ---\n"
-                f"- Cover backend and frontend completely when both skills are present.\n"
-                f"- Keep each subtask focused and implementation-ready.\n"
+            self.job_manager.log(job_id, error_msg, "Insufficient Subtasks", level="ERROR")
+            error(error_msg, "RequirementsManager")
+            raise Exception(error_msg)
+
+        # CRITICAL: Ensure required technical domains from selected skills are represented.
+        if missing_coverage:
+            missing_labels = ", ".join(missing_coverage)
+            error_msg = (
+                f"🚫 PIPELINE ABORTED: Work plan is missing required technical coverage for: {missing_labels}. "
+                "Selected skills are mandatory requirements, so code generation was stopped to avoid incomplete implementation."
             )
-            expanded_work_plan = await self.ai_service.generate_work_plan(work_plan_context + expansion_instruction)
-            expanded_subtasks = self.ai_service.parse_work_plan(expanded_work_plan)
-            if len(expanded_subtasks) > len(parsed_subtasks):
-                work_plan = expanded_work_plan
-                parsed_subtasks = expanded_subtasks
-                job_store[job_id]["work_plan"] = work_plan
+            self.job_manager.log(job_id, error_msg, "Missing Skill Coverage", level="ERROR")
+            error(error_msg, "RequirementsManager")
+            raise Exception(error_msg)
         
         # CRITICAL: Verify that subtasks were actually parsed
         if not parsed_subtasks or len(parsed_subtasks) == 0:
@@ -334,3 +372,89 @@ class RequirementsManager:
         if is_fullstack:
             return 8 if prd_len > 600 else 6
         return 5 if prd_len > 600 else 4
+
+    def _build_skill_requirements_context(self, technical_config: Dict[str, Any]) -> str:
+        """Build explicit skill-driven planning instructions for work-plan generation."""
+        if not technical_config:
+            return ""
+
+        selected_skills = technical_config.get("skills", [])
+        skill_lines: List[str] = []
+        for skill in selected_skills:
+            name = skill.get("name", "unknown-skill")
+            skill_type = skill.get("type", "full")
+            description = skill.get("description", "")
+            line = f"- {name} [{skill_type}]"
+            if description:
+                line += f": {description}"
+            skill_lines.append(line)
+
+        has_backend = bool(technical_config.get("backend"))
+        has_frontend = bool(technical_config.get("frontend"))
+        has_full = bool(technical_config.get("full"))
+
+        sections: List[str] = []
+        sections.append("Technical Requirements (Selected Skills):")
+        if skill_lines:
+            sections.extend(skill_lines)
+        else:
+            sections.append("- No explicit skill metadata found.")
+
+        sections.append("")
+        sections.append("MANDATORY SKILL-TO-SUBTASK COVERAGE RULES:")
+        sections.append("- Every selected skill must be reflected in one or more subtasks.")
+        sections.append("- Do not omit technical layers required by the selected skills.")
+        if has_backend and has_frontend:
+            sections.append("- This is full-stack: include backend subtasks and frontend subtasks.")
+            sections.append("- Include API integration subtasks that connect frontend and backend flows.")
+        elif has_backend:
+            sections.append("- Backend is required: include backend architecture, API, and data-layer subtasks.")
+        elif has_frontend:
+            sections.append("- Frontend is required: include frontend architecture, pages/components, and API client subtasks.")
+        if has_full:
+            sections.append("- Include cross-cutting quality/reliability subtasks from full-stack skills.")
+
+        if has_backend:
+            sections.append("")
+            sections.append("BACKEND SKILL REQUIREMENTS:")
+            sections.append("=" * 80)
+            sections.append(technical_config["backend"])
+        if has_frontend:
+            sections.append("")
+            sections.append("FRONTEND SKILL REQUIREMENTS:")
+            sections.append("=" * 80)
+            sections.append(technical_config["frontend"])
+        if has_full:
+            sections.append("")
+            sections.append("CROSS-CUTTING / FULL-STACK SKILL REQUIREMENTS:")
+            sections.append("=" * 80)
+            sections.append(technical_config["full"])
+
+        return "\n".join(sections) + "\n\n"
+
+    def _detect_missing_skill_coverage(self, parsed_subtasks: List[Dict[str, str]], technical_config: Dict[str, Any]) -> List[str]:
+        """Heuristic coverage check to ensure required domains from selected skills appear in the plan."""
+        if not technical_config:
+            return []
+
+        plan_text = " ".join(
+            [f"{st.get('summary', '')} {st.get('description', '')}".lower() for st in (parsed_subtasks or [])]
+        )
+
+        missing: List[str] = []
+        if technical_config.get("backend"):
+            backend_keywords = ["backend", "fastapi", "api", "route", "service", "model", "database", "python"]
+            if not any(keyword in plan_text for keyword in backend_keywords):
+                missing.append("backend")
+
+        if technical_config.get("frontend"):
+            frontend_keywords = ["frontend", "next.js", "nextjs", "react", "ui", "component", "page", "typescript"]
+            if not any(keyword in plan_text for keyword in frontend_keywords):
+                missing.append("frontend")
+
+        if technical_config.get("full"):
+            full_keywords = ["test", "quality", "validation", "lint", "integration", "deployment", "e2e"]
+            if not any(keyword in plan_text for keyword in full_keywords):
+                missing.append("cross-cutting quality")
+
+        return missing

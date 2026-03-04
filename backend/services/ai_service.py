@@ -231,6 +231,17 @@ class AIService:
             logger.warning("Defaulting to gemini")
             self.vendor = "gemini"
             self._init_gemini()
+
+    def _normalize_ai_text(self, value: Any) -> str:
+        """Normalize vendor response payload into a safe string."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            return str(value)
+        except Exception:
+            return ""
     
     def _init_gemini(self):
         """Initialize Google Gemini API client."""
@@ -438,6 +449,13 @@ Your task is to create a detailed technical work plan for implementing the follo
 REQUIREMENTS:
 {story_description}
 
+CRITICAL PLANNING RULES:
+- The PRD section is the product source of truth. Decompose all required features into implementation subtasks.
+- The "Technical Requirements (Selected Skills)" section is mandatory engineering guidance.
+- Every selected skill must be represented by one or more subtasks.
+- If both backend and frontend requirements are present, include subtasks for BOTH domains and their integration.
+- Do not skip testing/validation/quality tasks when required by skills.
+
 Format your response with SUBTASK markers exactly like this:
 
 SUBTASK: 1. [Short summary title]
@@ -603,6 +621,16 @@ Desc: [Detailed description]
         if not work_plan:
             return subtasks
 
+        def add_subtask(summary: str, description: str) -> None:
+            summary = re.sub(r'^\d+[\.:\s]+', '', (summary or "").strip()).strip()
+            description = (description or "").strip()
+            if not summary or not description:
+                return
+            if any(s["summary"] == summary and s["description"] == description for s in subtasks):
+                return
+            subtasks.append({"summary": summary, "description": description})
+            logger.info(f"Parsed subtask: {summary}")
+
         # Primary format:
         # SUBTASK: <title>
         # Desc|Description: <details>
@@ -612,11 +640,27 @@ Desc: [Detailed description]
             re.DOTALL | re.IGNORECASE,
         )
         for match in primary_pattern.finditer(work_plan):
-            summary = re.sub(r'^\d+[\.:\s]+', '', match.group("title").strip()).strip()
-            description = match.group("desc").strip()
-            if summary and description:
-                subtasks.append({"summary": summary, "description": description})
-                logger.info(f"Parsed subtask: {summary}")
+            add_subtask(match.group("title"), match.group("desc"))
+
+        # Variant format:
+        # Optional heading emphasis plus "Subtask" marker and free-form body.
+        # Example:
+        # ### Subtask 1: Setup backend
+        # Description: ...
+        # (or body text without explicit "Description:" label)
+        subtask_block_pattern = re.compile(
+            r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*SUBTASK(?:\s*#?\s*\d+)?\s*[:\-]\s*(?P<title>[^\n]+?)\s*(?:\*\*)?\s*\n(?P<body>.*?)(?=^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*SUBTASK(?:\s*#?\s*\d+)?\s*[:\-]|\Z)",
+            re.DOTALL | re.IGNORECASE | re.MULTILINE,
+        )
+        for match in subtask_block_pattern.finditer(work_plan):
+            body = match.group("body").strip()
+            desc_match = re.search(
+                r"(?im)^\s*(?:Desc|Description|Details|Implementation)\s*:\s*(?P<desc>.*)",
+                body,
+                re.DOTALL,
+            )
+            description = desc_match.group("desc").strip() if desc_match else body
+            add_subtask(match.group("title"), description)
 
         # Fallback format (common model drift):
         # 1. <title>
@@ -626,15 +670,16 @@ Desc: [Detailed description]
             re.DOTALL | re.IGNORECASE | re.MULTILINE,
         )
         for match in fallback_pattern.finditer(work_plan):
-            summary = match.group("title").strip()
-            description = match.group("desc").strip()
-            if not summary or not description:
-                continue
-            # Merge with primary results while preserving order.
-            if any(s["summary"] == summary and s["description"] == description for s in subtasks):
-                continue
-            subtasks.append({"summary": summary, "description": description})
-            logger.info(f"Parsed subtask: {summary}")
+            add_subtask(match.group("title"), match.group("desc"))
+
+        # Fallback for inline numbered items:
+        # 1) <title>: <description>
+        inline_numbered_pattern = re.compile(
+            r"^\s*\d+[.)]\s*(?P<title>[^:\n]+?)\s*[:\-]\s*(?P<desc>[^\n]+)\s*$",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        for match in inline_numbered_pattern.finditer(work_plan):
+            add_subtask(match.group("title"), match.group("desc"))
 
         return subtasks
     
@@ -817,7 +862,12 @@ class User(BaseModel):
                 text, reason = await self._generate_code_openai(prompt, max_output_tokens, temperature, timeout)
             elif self.vendor == "openrouter":
                 text, reason = await self._generate_code_openrouter(prompt, max_output_tokens, temperature, timeout)
-            
+
+            text = self._normalize_ai_text(text)
+            if not text.strip():
+                logger.warning("⚠️ [AIService] AI returned empty code response; returning controlled fallback")
+                return ("FILE_PATH: error.txt\n---\n# Error: Empty AI code generation response\n---", 'EMPTY')
+
             logger.info(f"🤖 [AIService] AI Response received. Length: {len(text)} characters, Finish Reason: {reason}")
             return (text, reason)
         except Exception as e:
@@ -840,7 +890,8 @@ class User(BaseModel):
         finish_reason = 'STOP'
         if hasattr(response, 'candidates') and response.candidates:
             finish_reason = str(response.candidates[0].finish_reason)
-        return (response.text, finish_reason)
+        text = self._normalize_ai_text(getattr(response, 'text', None))
+        return (text, finish_reason)
     
     async def _generate_code_anthropic(self, prompt: str, max_tokens: int, temp: float, timeout: float) -> tuple:
         """Generate code using Anthropic API."""
@@ -853,7 +904,18 @@ class User(BaseModel):
             )
         
         response = await self._call_with_retry(call_anthropic, timeout=timeout)
-        return (response.content[0].text, str(response.stop_reason))
+        text = ""
+        try:
+            if getattr(response, 'content', None):
+                text_parts = []
+                for block in response.content:
+                    block_text = self._normalize_ai_text(getattr(block, 'text', None))
+                    if block_text:
+                        text_parts.append(block_text)
+                text = "\n".join(text_parts).strip()
+        except Exception:
+            text = ""
+        return (text, str(getattr(response, 'stop_reason', 'UNKNOWN')))
     
     async def _generate_code_openai(self, prompt: str, max_tokens: int, temp: float, timeout: float) -> tuple:
         """Generate code using OpenAI API."""
@@ -866,7 +928,11 @@ class User(BaseModel):
             )
         
         response = await self._call_with_retry(call_openai, timeout=timeout)
-        return (response.choices[0].message.content, response.choices[0].finish_reason)
+        choice = response.choices[0] if getattr(response, 'choices', None) else None
+        msg = choice.message if choice else None
+        text = self._normalize_ai_text(getattr(msg, 'content', None))
+        finish_reason = getattr(choice, 'finish_reason', 'UNKNOWN')
+        return (text, finish_reason)
     
     async def _generate_code_openrouter(self, prompt: str, max_tokens: int, temp: float, timeout: float) -> tuple:
         """Generate code using OpenRouter API (compatible with OpenAI SDK)."""
@@ -879,10 +945,17 @@ class User(BaseModel):
             )
         
         response = await self._call_with_retry(call_openrouter, timeout=timeout)
-        return (response.choices[0].message.content, response.choices[0].finish_reason)
+        choice = response.choices[0] if getattr(response, 'choices', None) else None
+        msg = choice.message if choice else None
+        text = self._normalize_ai_text(getattr(msg, 'content', None))
+        finish_reason = getattr(choice, 'finish_reason', 'UNKNOWN')
+        return (text, finish_reason)
     
     def parse_generated_code(self, response: str) -> List[Dict[str, str]]:
         """Extract file paths and content from generated code response."""
+        if response is None:
+            logger.warning("⚠️ [AIService] Parsing skipped: response is None")
+            return []
         logger.info(f"🔍 [AIService] Parsing code generation response (length: {len(response)})")
         if not response or len(response) < 10:
             logger.warning("⚠️ [AIService] AI response is empty or too short!")
