@@ -500,7 +500,7 @@ class DeploymentFixer:
         
         for file_path, file_info in files_to_fix.items():
             item = (file_path, file_info)
-            content_size = len(file_info.get('content', ''))
+            content_size = len(file_info.get('content') or '')
             
             # Files > 5000 chars should be processed individually to avoid MAX_TOKENS
             if content_size > 5000:
@@ -1883,6 +1883,7 @@ class DeploymentFixer:
     def _should_try_programmatic(self, file_path: str, file_info: dict) -> bool:
         """Should we try programmatic fix?"""
         missing_items = [str(err) for err in file_info.get('missing', [])]
+        file_content = file_info.get('content') or ""
         
         # CRITICAL: Always prioritize AI Concatenation Errors (embedded markers)
         # This must come BEFORE any file-path specific early returns that might skip it.
@@ -1901,10 +1902,18 @@ class DeploymentFixer:
         # NEW: Python shim files with missing exports - fix without AI to avoid credit waste
         if file_path.endswith('.py') and any('Missing export:' in err for err in missing_items):
             return True
+        # Deterministic fix: main.py cannot use relative imports (from .x import y).
+        if file_path.endswith('main.py') and any('CANNOT use relative imports' in err for err in missing_items):
+            return True
         if self._is_test_file(file_path):
             return True  # Always try programmatic for test files
         # Deterministic syntax cleanup for common JSX inline-comment breakage (TS1005).
         if file_path.endswith(('.tsx', '.jsx')) and any(("1005" in err) or ("'...' expected" in err) for err in missing_items):
+            return True
+        # Deterministic fix for JSX accidentally generated inside .ts hooks/files.
+        if file_path.endswith('.ts') and any(
+            token in err for err in missing_items for token in ("'>' expected", "')' expected", "Property assignment expected")
+        ):
             return True
         # Deterministic fix for auth page/component prop contract drift:
         # Type '{}' is missing required FormProps when rendering <LoginForm /> etc.
@@ -1917,7 +1926,9 @@ class DeploymentFixer:
             # For missing exports in shared type files, deterministic export stubs are safer than repeated AI loops.
             if any('Missing export:' in err or 'not found in' in err for err in missing_items):
                 return True
-            return len(file_info.get('content', '')) < 500
+            if any("*/ expected" in err for err in missing_items):
+                return True
+            return len(file_content) < 500
         # NEW: Try programmatic fix for files with "from backend.X" errors
         if file_path.endswith('.py') and any('backend.' in err for err in missing_items):
             return True
@@ -1948,10 +1959,16 @@ class DeploymentFixer:
             # NEW: Python files with "Missing export:" — append stubs without touching the AI
             elif file_path.endswith('.py') and any('Missing export:' in str(err) for err in file_info.get('missing', [])):
                 return await self._fix_python_missing_exports(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith('main.py') and any('CANNOT use relative imports' in str(err) for err in file_info.get('missing', [])):
+                return await self._fix_main_relative_imports(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.test.tsx', '.test.ts')):
                 return await self._fix_test_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.tsx', '.jsx')) and any(("1005" in str(err)) or ("'...' expected" in str(err)) for err in file_info.get('missing', [])):
                 return await self._fix_jsx_inline_comment_syntax(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith('.ts') and any(
+                token in str(err) for err in file_info.get('missing', []) for token in ("'>' expected", "')' expected", "Property assignment expected")
+            ):
+                return await self._fix_ts_with_jsx_syntax(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.tsx', '.jsx')) and any(
                 ("Type '{}' is missing the following properties from type" in str(err) and "FormProps" in str(err))
                 for err in file_info.get('missing', [])
@@ -2267,6 +2284,91 @@ class DeploymentFixer:
 
         self._safe_log(job_id, f"✅ Removed inline JSX comments causing TS1005 in {file_path}", "JSX Syntax Fix")
         return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_main_relative_imports(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Convert relative imports in backend entrypoint main.py to absolute local imports."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+        # from .config import X -> from config import X
+        content = re.sub(r'^\s*from\s+\.(\w+)\s+import\s+', r'from \1 import ', content, flags=re.MULTILINE)
+        # import .config -> import config (rare, but guard anyway)
+        content = re.sub(r'^\s*import\s+\.(\w+)\b', r'import \1', content, flags=re.MULTILINE)
+
+        if content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self._safe_log(job_id, f"🧹 Orchestrator: Removed relative imports in entrypoint {file_path}", "Programmatic Fix")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_ts_with_jsx_syntax(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """
+        Fix JSX syntax accidentally generated inside .ts files (common in React hooks/providers).
+        Strategy:
+        - If .ts file contains <AuthContext.Provider ...>, convert that return block to createElement(...)
+          so the file remains valid .ts without JSX parsing.
+        """
+        if not file_path.endswith('.ts'):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+
+        if "<AuthContext.Provider" in content and "</AuthContext.Provider>" in content:
+            # Capture value object from: <AuthContext.Provider value={{ ... }}>
+            value_match = re.search(
+                r"<AuthContext\.Provider\s+value=\{\{(.*?)\}\}\s*>",
+                content,
+                flags=re.DOTALL
+            )
+            if value_match:
+                value_expr = value_match.group(1).strip()
+                provider_block_pattern = re.compile(
+                    r"return\s*\(\s*<AuthContext\.Provider\s+value=\{\{.*?\}\}\s*>\s*\{children\}\s*</AuthContext\.Provider>\s*\);\s*",
+                    flags=re.DOTALL
+                )
+                replacement = (
+                    f"return createElement(AuthContext.Provider, {{ value: {{ {value_expr} }} }}, children);\n"
+                )
+                content = provider_block_pattern.sub(replacement, content)
+                # Ensure createElement is imported from react
+                if "import { createContext, useContext, useState, useEffect, useCallback } from 'react';" in content:
+                    content = content.replace(
+                        "import { createContext, useContext, useState, useEffect, useCallback } from 'react';",
+                        "import { createElement, createContext, useContext, useState, useEffect, useCallback } from 'react';"
+                    )
+                elif "from 'react';" in content:
+                    react_import_match = re.search(r"import\s+\{([^}]*)\}\s+from\s+'react';", content)
+                    if react_import_match and "createElement" not in react_import_match.group(1):
+                        content = re.sub(
+                            r"import\s+\{([^}]*)\}\s+from\s+'react';",
+                            lambda m: f"import {{ createElement, {m.group(1).strip()} }} from 'react';",
+                            content,
+                            count=1
+                        )
+
+        if content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self._safe_log(job_id, f"🧹 Orchestrator: Converted JSX syntax to TS-safe createElement in {file_path}", "Programmatic Fix")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
     
     async def _fix_package_json(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add missing packages and resiliently fix syntax errors"""
@@ -2535,8 +2637,48 @@ class DeploymentFixer:
         """Add missing type exports"""
         missing = file_info.get('missing', [])
         local = os.path.join(repo_dir, file_path)
-        original_content = file_info.get('content', '')
+        original_content = file_info.get('content') or ''
+        if not original_content and os.path.exists(local):
+            with open(local, 'r') as f:
+                original_content = f.read()
         content = original_content
+
+        # Repair unterminated block comments that cause parse errors like "*/ expected".
+        def _fix_unterminated_block_comments(ts_content: str) -> str:
+            if not ts_content:
+                return ts_content
+            if ts_content.count("/*") <= ts_content.count("*/"):
+                return ts_content
+
+            token_re = re.compile(r"/\*|\*/")
+            opens = []
+            for match in token_re.finditer(ts_content):
+                token = match.group(0)
+                if token == "/*":
+                    opens.append(match.start())
+                elif opens:
+                    opens.pop()
+
+            if not opens:
+                return ts_content
+
+            insert_at = None
+            last_unclosed = opens[-1]
+            export_match = re.search(r"(?m)^\s*export\b", ts_content[last_unclosed:])
+            if export_match:
+                insert_at = last_unclosed + export_match.start()
+
+            if insert_at is None:
+                import_match = re.search(r"(?m)^\s*import\b", ts_content[last_unclosed:])
+                if import_match:
+                    insert_at = last_unclosed + import_match.start()
+
+            if insert_at is None:
+                return ts_content.rstrip() + "\n*/\n"
+
+            return ts_content[:insert_at] + "*/\n" + ts_content[insert_at:]
+
+        content = _fix_unterminated_block_comments(content)
 
         # Clean up invalid interfaces accidentally generated from error text in previous attempts.
         content = re.sub(

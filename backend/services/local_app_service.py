@@ -19,6 +19,38 @@ class LocalAppService:
         self.last_startup_diagnostics: Dict[str, Any] = {}
         # Reserve Orion's own default ports so generated apps never collide.
         self._reserved_ports = {8000, 3000}
+    
+    def _resolve_service_dirs(self, repo_dir: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Resolve backend/frontend directories for both monorepo and single-repo layouts.
+
+        Supported layouts:
+        - Monorepo: <repo>/backend and/or <repo>/frontend
+        - Backend-only repo: backend files at <repo> root (e.g., main.py)
+        - Frontend-only repo: frontend files at <repo> root (e.g., package.json)
+        """
+        backend_dir = None
+        frontend_dir = None
+
+        monorepo_backend = os.path.join(repo_dir, 'backend')
+        monorepo_frontend = os.path.join(repo_dir, 'frontend')
+
+        if os.path.isdir(monorepo_backend):
+            backend_dir = monorepo_backend
+        if os.path.isdir(monorepo_frontend):
+            frontend_dir = monorepo_frontend
+
+        # Fallback: backend-only repository rooted at repo_dir
+        if backend_dir is None:
+            if any(os.path.exists(os.path.join(repo_dir, marker)) for marker in ('main.py', 'requirements.txt')):
+                backend_dir = repo_dir
+
+        # Fallback: frontend-only repository rooted at repo_dir
+        if frontend_dir is None:
+            if os.path.exists(os.path.join(repo_dir, 'package.json')):
+                frontend_dir = repo_dir
+
+        return backend_dir, frontend_dir
 
     def _can_bind_port(self, host: str, port: int) -> bool:
         """Check whether host:port can be bound right now."""
@@ -73,6 +105,10 @@ class LocalAppService:
         self.last_startup_diagnostics = {}
         
         try:
+            backend_dir, frontend_dir = self._resolve_service_dirs(repo_dir)
+            if not backend_dir and not frontend_dir:
+                return False, "No backend or frontend project directory found", {}
+
             # Allocate ports dynamically to avoid conflicts with existing local services.
             self.backend_port = self._find_available_port(8100, reserved_ports=self._reserved_ports)
             frontend_reserved = set(self._reserved_ports)
@@ -80,30 +116,29 @@ class LocalAppService:
             self.frontend_port = self._find_available_port(3100, reserved_ports=frontend_reserved)
             logger.info(f"Selected local ports: backend={self.backend_port}, frontend={self.frontend_port}")
 
-            # Start backend
-            backend_started, backend_msg = await self._start_backend(repo_dir, job_id)
-            if not backend_started:
-                self.last_startup_diagnostics['phase'] = 'backend_startup'
-                self.last_startup_diagnostics['backend_error'] = backend_msg
-                return False, f"Backend failed to start: {backend_msg}", {}
-            
-            # Start frontend
-            frontend_started, frontend_msg = await self._start_frontend(repo_dir, job_id)
-            if not frontend_started:
-                # Stop backend if frontend fails
-                await self._stop_backend(job_id)
-                self.last_startup_diagnostics['phase'] = 'frontend_startup'
-                self.last_startup_diagnostics['frontend_error'] = frontend_msg
-                return False, f"Frontend failed to start: {frontend_msg}", {}
-            
-            # Both started successfully
-            backend_url = f"http://localhost:{self.backend_port}"
-            frontend_url = f"http://localhost:{self.frontend_port}"
-            
-            return True, "App started successfully", {
-                'backend_url': backend_url,
-                'frontend_url': frontend_url
-            }
+            urls: Dict[str, str] = {}
+
+            # Start backend when present
+            if backend_dir:
+                backend_started, backend_msg = await self._start_backend(backend_dir, job_id)
+                if not backend_started:
+                    self.last_startup_diagnostics['phase'] = 'backend_startup'
+                    self.last_startup_diagnostics['backend_error'] = backend_msg
+                    return False, f"Backend failed to start: {backend_msg}", {}
+                urls['backend_url'] = f"http://localhost:{self.backend_port}"
+
+            # Start frontend when present
+            if frontend_dir:
+                frontend_started, frontend_msg = await self._start_frontend(frontend_dir, job_id)
+                if not frontend_started:
+                    # Stop backend if frontend fails in mixed deployments.
+                    await self._stop_backend(job_id)
+                    self.last_startup_diagnostics['phase'] = 'frontend_startup'
+                    self.last_startup_diagnostics['frontend_error'] = frontend_msg
+                    return False, f"Frontend failed to start: {frontend_msg}", {}
+                urls['frontend_url'] = f"http://localhost:{self.frontend_port}"
+
+            return True, "App started successfully", urls
         
         except Exception as e:
             error_msg = f"Error starting app locally: {str(e)}"
@@ -114,10 +149,8 @@ class LocalAppService:
             self.last_startup_diagnostics['exception'] = error_msg
             return False, error_msg, {}
     
-    async def _start_backend(self, repo_dir: str, job_id: str) -> Tuple[bool, str]:
+    async def _start_backend(self, backend_dir: str, job_id: str) -> Tuple[bool, str]:
         """Start the backend FastAPI server locally in an isolated virtual environment."""
-        backend_dir = os.path.join(repo_dir, 'backend')
-        
         # Check if backend directory exists
         if not os.path.exists(backend_dir):
             return False, "Backend directory not found"
@@ -232,10 +265,8 @@ class LocalAppService:
         except Exception as e:
             return False, f"Failed to start backend: {str(e)}"
     
-    async def _start_frontend(self, repo_dir: str, job_id: str) -> Tuple[bool, str]:
+    async def _start_frontend(self, frontend_dir: str, job_id: str) -> Tuple[bool, str]:
         """Start the frontend Next.js server locally."""
-        frontend_dir = os.path.join(repo_dir, 'frontend')
-        
         # Check if frontend directory exists
         if not os.path.exists(frontend_dir):
             return False, "Frontend directory not found"

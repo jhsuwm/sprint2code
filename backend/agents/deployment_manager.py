@@ -832,18 +832,21 @@ class DeploymentManager:
 
     async def _handle_startup_success(self, job_id: str, urls: Dict[str, str]):
         self.job_manager.log(job_id, "✅ App started successfully on local machine", "Startup Complete")
-        backend_url = urls.get('backend_url', 'http://localhost:8100')
-        frontend_url = urls.get('frontend_url', 'http://localhost:3100')
-        
-        # EXPLICIT LOGGING FOR USER VISIBILITY
-        self.job_manager.log(job_id, f"🚀 AI-generated frontend is running at: {frontend_url}", "App URL")
-        self.job_manager.log(job_id, f"📡 Backend API is running at: {backend_url}", "API URL")
-        
-        job_store[job_id].update({
-            "backend_url": backend_url,
-            "frontend_url": frontend_url,
-            "app_status": "RUNNING_LOCALLY"
-        })
+        backend_url = urls.get('backend_url')
+        frontend_url = urls.get('frontend_url')
+
+        # EXPLICIT LOGGING FOR USER VISIBILITY (support backend-only/frontend-only repos)
+        if frontend_url:
+            self.job_manager.log(job_id, f"🚀 AI-generated frontend is running at: {frontend_url}", "App URL")
+        if backend_url:
+            self.job_manager.log(job_id, f"📡 Backend API is running at: {backend_url}", "API URL")
+
+        update_payload = {"app_status": "RUNNING_LOCALLY"}
+        if backend_url:
+            update_payload["backend_url"] = backend_url
+        if frontend_url:
+            update_payload["frontend_url"] = frontend_url
+        job_store[job_id].update(update_payload)
 
         # FETCH INITIAL LOGS FOR UI CONTAINERS
         # This ensures the "Frontend Log" and "Backend Log" boxes in the UI are not empty on start
@@ -862,12 +865,32 @@ class DeploymentManager:
         
         # Check health
         backend_healthy, frontend_healthy = await self.local_app_service.check_health(job_id)
-        
-        if backend_healthy and frontend_healthy:
-            self.job_manager.log(job_id, "✅ Both services are running and healthy", "Health Check Success")
-            job_store[job_id]["app_status"] = "HEALTHY"
+
+        # Determine expected services based on started URLs.
+        expects_backend = bool(backend_url)
+        expects_frontend = bool(frontend_url)
+
+        if expects_backend and expects_frontend:
+            if backend_healthy and frontend_healthy:
+                self.job_manager.log(job_id, "✅ Both services are running and healthy", "Health Check Success")
+                job_store[job_id]["app_status"] = "HEALTHY"
+            else:
+                self.job_manager.log(job_id, "⚠️ One or more services may have issues", "Health Check Warning", level="WARNING")
+        elif expects_backend:
+            if backend_healthy:
+                self.job_manager.log(job_id, "✅ Backend service is running and healthy", "Health Check Success")
+                job_store[job_id]["app_status"] = "HEALTHY"
+            else:
+                self.job_manager.log(job_id, "⚠️ Backend service may have issues", "Health Check Warning", level="WARNING")
+        elif expects_frontend:
+            if frontend_healthy:
+                self.job_manager.log(job_id, "✅ Frontend service is running and healthy", "Health Check Success")
+                job_store[job_id]["app_status"] = "HEALTHY"
+            else:
+                self.job_manager.log(job_id, "⚠️ Frontend service may have issues", "Health Check Warning", level="WARNING")
         else:
-            self.job_manager.log(job_id, "⚠️ One or more services may have issues", "Health Check Warning", level="WARNING")
+            # Should not happen, but keep behavior deterministic.
+            self.job_manager.log(job_id, "⚠️ Startup reported success but no service URLs were returned", "Health Check Warning", level="WARNING")
 
     async def _handle_startup_failure(self, job_id, story_id, story_key, error_output):
         """Handle local startup failure."""
