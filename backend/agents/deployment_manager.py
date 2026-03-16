@@ -265,8 +265,15 @@ class DeploymentManager:
         repo_dir = os.path.join(temp_dir, target_subdir)
         
         # Install frontend deps for analysis
-        frontend_dir = repo_dir if target_subdir == 'frontend' else os.path.join(repo_dir, "frontend")
-        if os.path.exists(frontend_dir) and os.path.exists(os.path.join(frontend_dir, "package.json")):
+        frontend_dir = None
+        if target_subdir == 'frontend' and os.path.exists(os.path.join(repo_dir, "package.json")):
+            frontend_dir = repo_dir
+        elif os.path.exists(os.path.join(repo_dir, "frontend", "package.json")):
+            frontend_dir = os.path.join(repo_dir, "frontend")
+        elif os.path.exists(os.path.join(repo_dir, "package.json")):
+            frontend_dir = repo_dir
+
+        if frontend_dir and os.path.exists(os.path.join(frontend_dir, "package.json")):
             npm_path = self._find_tool_path('npm')
             if not npm_path:
                 self.job_manager.log(None, "⚠️ npm not found, skipping frontend dependency installation", "Tool Warning", level="WARNING")
@@ -303,6 +310,17 @@ class DeploymentManager:
         
         return None
 
+    def _has_dependency_env_errors(self, errors: List[str]) -> bool:
+        """Detect environment errors that indicate dependency install is missing/invalid."""
+        if not errors:
+            return False
+        for err in errors:
+            if "ENVIRONMENT ERROR: TypeScript validation skipped" in err:
+                return True
+            if "Missing 'node_modules'" in err or "Incomplete 'node_modules'" in err:
+                return True
+        return False
+
     async def _perform_static_analysis_autofix(self, job_id, story_key, all_errors, github_repo, github_branch, repo_dir) -> bool:
         """
         Perform static analysis auto-fix
@@ -311,13 +329,32 @@ class DeploymentManager:
         # Generic proactive fix for structural issues
         if self.fixer.proactively_fix_dependencies(repo_dir, all_errors):
             self.job_manager.log(job_id, "Proactively fixed structural issues in dependency files.", "Proactive Fix")
+
+        # If dependency environment errors exist, try to refresh before establishing baseline.
+        env_refresh_attempts = 0
+        while self._has_dependency_env_errors(all_errors) and env_refresh_attempts < 2:
+            self.job_manager.log(
+                job_id,
+                "⚠️ Dependency environment errors detected. Refreshing frontend dependencies before auto-fix baseline...",
+                "Environment",
+                level="WARNING"
+            )
+            await self.fixer._refresh_frontend_dependencies(repo_dir, job_id)
+            all_errors = self.validator.validate_all(repo_dir)
+            env_refresh_attempts += 1
         
         # IMPROVED ADAPTIVE APPROACH: Continue until all errors resolved or truly stuck
         max_attempts = int(os.getenv('AUTO_FIX_MAX_CYCLES', '12'))
         max_runtime_minutes = int(os.getenv('AUTO_FIX_MAX_RUNTIME_MINUTES', '25'))
+        progress_grace_minutes = int(os.getenv('AUTO_FIX_PROGRESS_GRACE_MINUTES', '8'))
+        progress_extension_minutes = int(os.getenv('AUTO_FIX_PROGRESS_EXTENSION_MINUTES', '10'))
+        max_progress_extensions = int(os.getenv('AUTO_FIX_PROGRESS_MAX_EXTENSIONS', '2'))
+        progress_extensions_used = 0
         cycle_timeout_sec = int(os.getenv('AUTO_FIX_CYCLE_TIMEOUT_SEC', '300'))
         start_time = datetime.now(timezone.utc)
-        
+        last_progress_time = start_time
+
+        baseline_initialized = False
         initial_error_count = len(all_errors)
         lowest_error_count = initial_error_count
         attempt = 0
@@ -332,12 +369,33 @@ class DeploymentManager:
         while attempt < max_attempts:
             attempt += 1
             current_error_count = len(all_errors)
+            if not baseline_initialized and not self._has_dependency_env_errors(all_errors):
+                initial_error_count = current_error_count
+                lowest_error_count = current_error_count
+                baseline_initialized = True
+                consecutive_no_change = 0
+                consecutive_same_errors = 0
+                cycles_without_best_improvement = 0
+                regression_strikes = 0
+                consecutive_regressions = 0
+                self.job_manager.log(job_id, f"📌 Auto-fix baseline established at {initial_error_count} errors", "Auto-Fix Baseline")
             
             # Check runtime limit
             elapsed_minutes = (datetime.now(timezone.utc) - start_time).total_seconds() / 60
             if elapsed_minutes >= max_runtime_minutes:
-                self.job_manager.log(job_id, f"⏱️ Stopping: Reached {max_runtime_minutes} minute runtime limit (elapsed: {elapsed_minutes:.1f}m)", "Auto-Fix Timeout", level="WARNING")
-                break
+                minutes_since_progress = (datetime.now(timezone.utc) - last_progress_time).total_seconds() / 60
+                if progress_extensions_used < max_progress_extensions and minutes_since_progress <= progress_grace_minutes:
+                    max_runtime_minutes += progress_extension_minutes
+                    progress_extensions_used += 1
+                    self.job_manager.log(
+                        job_id,
+                        f"⏱️ Extending auto-fix runtime by {progress_extension_minutes}m due to recent progress (extension {progress_extensions_used}/{max_progress_extensions})",
+                        "Auto-Fix Timeout",
+                        level="WARNING"
+                    )
+                else:
+                    self.job_manager.log(job_id, f"⏱️ Stopping: Reached {max_runtime_minutes} minute runtime limit (elapsed: {elapsed_minutes:.1f}m)", "Auto-Fix Timeout", level="WARNING")
+                    break
             
             # Create signature of current errors to detect if we're truly stuck
             error_signature = hash(tuple(sorted(all_errors)))
@@ -411,10 +469,23 @@ class DeploymentManager:
             self.fixer.update_error_history(job_id, all_errors, repo_dir)
             
             new_error_count = len(all_errors)
+            if self._has_dependency_env_errors(all_errors):
+                # Environment not stable yet; don't treat as regression/stagnation.
+                self.job_manager.log(
+                    job_id,
+                    "⚠️ Dependency environment errors still present after cycle; skipping regression/stagnation checks this round.",
+                    "Auto-Fix Environment",
+                    level="WARNING"
+                )
+                consecutive_no_change = 0
+                consecutive_same_errors = 0
+                cycles_without_best_improvement = 0
+                consecutive_regressions = 0
+                continue
             
             # Early-cycle regressions are common while related files are being converged.
             # Do not hard-stop after cycle 1/2; continue with recovery mode.
-            if attempt <= 2 and new_error_count > (initial_error_count * 1.5):
+            if baseline_initialized and attempt <= 2 and new_error_count > (initial_error_count * 1.5):
                 self.job_manager.log(
                     job_id,
                     f"⚠️ Early regression detected ({initial_error_count} → {new_error_count}). Continuing with recovery mode instead of stopping.",
@@ -473,6 +544,7 @@ class DeploymentManager:
             if new_error_count < lowest_error_count and not has_env_error:
                 lowest_error_count = new_error_count
                 last_significant_progress_cycle = attempt
+                last_progress_time = datetime.now(timezone.utc)
                 cycles_without_best_improvement = 0
                 reduction = current_error_count - new_error_count
                 consecutive_regressions = 0
@@ -489,7 +561,7 @@ class DeploymentManager:
                 continue
             else:
                 cycles_without_best_improvement += 1
-                if cycles_without_best_improvement >= 4 and attempt >= 4:
+                if baseline_initialized and cycles_without_best_improvement >= 4 and attempt >= 4:
                     self.job_manager.log(
                         job_id,
                         f"⚠️ No new best error count for {cycles_without_best_improvement} cycles (best: {lowest_error_count}). Stopping to avoid runaway auto-fix.",
@@ -599,6 +671,9 @@ class DeploymentManager:
         
         # Final summary
         final_count = len(all_errors)
+        if not baseline_initialized:
+            initial_error_count = max(initial_error_count, final_count)
+            lowest_error_count = min(lowest_error_count, final_count)
         
         # If final result is worse than best achieved, report it; do not pretend success.
         if final_count > lowest_error_count:
@@ -982,10 +1057,39 @@ class DeploymentManager:
         missing_resolve = re.search(r"Module not found:.*Can't resolve ['\"]([^'\"]+)['\"]", combined, re.IGNORECASE)
         if missing_resolve:
             module_name = missing_resolve.group(1)
-            if module_name.startswith(('@/','./','../','~/', '/')):
+            if (
+                module_name.startswith(('@/','./','../','~/', '#/', '/'))
+                or module_name in ('~', '#', '@')
+                or module_name == '@types'
+                or module_name.startswith('@types/')
+                or module_name.startswith('@api/')
+            ):
                 errors.append(f"TypeScript error in 'src/app/page.tsx' at 1,1: 2307: Cannot find module '{module_name}'")
             else:
                 errors.append(f"Missing dependency: '{module_name}' in package.json")
+
+        # Backend pip install failures during startup should trigger requirements auto-fix.
+        if "Failed to install dependencies" in combined or "subprocess-exited-with-error" in combined:
+            errors.append("Runtime pip install failure in requirements.txt")
+            # Common known trap: deprecated azure meta-package.
+            if re.search(r"\bazure\b", combined, re.IGNORECASE):
+                errors.append("Invalid pip requirement in 'requirements.txt': 'azure'")
+                errors.append("Missing dependency: 'azure-storage-blob' in requirements.txt")
+
+        # Runtime undefined symbol errors (NameError) from backend startup traceback.
+        name_error = re.search(r"NameError:\s*name ['\"]([^'\"]+)['\"] is not defined", combined)
+        if name_error:
+            missing_name = name_error.group(1)
+            frame_matches = re.findall(r'File "([^"]+)", line \d+, in [^\n]+', combined)
+            target_file = "main.py"
+            for frame in reversed(frame_matches):
+                normalized = frame.replace("\\", "/")
+                if "/backend/" in normalized:
+                    target_file = normalized.split("/backend/", 1)[1]
+                    break
+            errors.append(
+                f"RuntimeNameError in '{target_file}': name '{missing_name}' is not defined"
+            )
 
         return errors
 

@@ -8,6 +8,7 @@ import asyncio
 import subprocess
 import json
 from typing import List, Dict, Any, Optional
+from urllib.parse import unquote
 from log_config import logger
 from agents.job_manager import job_store
 
@@ -45,6 +46,23 @@ class DeploymentFixer:
             # Fall back to direct logging if job not in manager (e.g., from worker)
             logger.info(f"[Job {job_id}] [{category}] {message}")
 
+    def _repo_prefixes(self, repo_dir: Optional[str]) -> Dict[str, str]:
+        """Detect repo layout prefixes for frontend/backend paths."""
+        if not repo_dir:
+            return {"frontend": "frontend", "backend": "backend"}
+        frontend_prefix = "frontend" if os.path.isdir(os.path.join(repo_dir, "frontend")) else ""
+        backend_prefix = "backend" if os.path.isdir(os.path.join(repo_dir, "backend")) else ""
+        return {"frontend": frontend_prefix, "backend": backend_prefix}
+
+    def _frontend_prefix(self, repo_dir: Optional[str]) -> str:
+        return self._repo_prefixes(repo_dir)["frontend"]
+
+    def _backend_prefix(self, repo_dir: Optional[str]) -> str:
+        return self._repo_prefixes(repo_dir)["backend"]
+
+    def _apply_prefix(self, prefix: str, path: str) -> str:
+        return f"{prefix}/{path}" if prefix else path
+
     def _normalize_repo_relative_path(self, path: str) -> str:
         """Normalize optional frontend/backend prefixes for robust file-path comparisons."""
         p = (path or "").strip().replace("\\", "/")
@@ -54,7 +72,25 @@ class DeploymentFixer:
             p = p[9:]
         elif p.startswith("backend/"):
             p = p[8:]
+        # Normalize dotted backend module-path files, e.g. routes.ticket_routes.py -> routes/ticket_routes.py
+        if p.endswith(".py") and "/" not in p and "." in p[:-3]:
+            p = p[:-3].replace(".", "/") + ".py"
         return p
+
+    def _is_frontend_alias_package(self, pkg: str) -> bool:
+        """Return True if token is a frontend path alias/local spec, not an npm package."""
+        p = (pkg or "").strip().strip("'\"")
+        if not p:
+            return False
+        if p.startswith(('@/','./','../','~/', '#/', '/')) or p in ('@', '~', '#'):
+            return True
+        # Orion alias scopes in generated apps.
+        if p.startswith('@api/'):
+            return True
+        # npm/package manager protocol specs should never appear as package names here.
+        if ':' in p or '\\' in p:
+            return True
+        return False
 
     def _paths_match(self, candidate_path: str, target_path: str) -> bool:
         """Check whether candidate and target refer to the same repo-relative file."""
@@ -73,6 +109,8 @@ class DeploymentFixer:
             p = p[9:]
         elif p.startswith("backend/"):
             p = p[8:]
+        if p.endswith(".py") and "/" not in p and "." in p[:-3]:
+            p = p[:-3].replace(".", "/") + ".py"
         p = re.sub(r"\.(tsx?|jsx?|py)$", "", p)
         p = re.sub(r"/index$", "", p)
         return p
@@ -111,7 +149,7 @@ class DeploymentFixer:
             or f"/{target_norm}" in error.replace("\\", "/")
         )
 
-    def _target_repo_prefix(self, target_file: str) -> str:
+    def _target_repo_prefix(self, target_file: str, repo_dir: Optional[str] = None) -> str:
         """Infer repo prefix for a target path."""
         p = (target_file or "").replace("\\", "/")
         if p.startswith("frontend/"):
@@ -119,21 +157,23 @@ class DeploymentFixer:
         if p.startswith("backend/"):
             return "backend"
         if p.endswith(".py"):
-            return "backend"
-        return "frontend"
+            return "backend" if self._backend_prefix(repo_dir) == "backend" else ""
+        return "frontend" if self._frontend_prefix(repo_dir) == "frontend" else ""
 
-    def _coerce_generated_path(self, generated_path: str, target_file: str) -> str:
+    def _coerce_generated_path(self, generated_path: str, target_file: str, repo_dir: Optional[str] = None) -> str:
         """Coerce generated file path to full workspace-relative path with repo prefix."""
         gp = (generated_path or "").strip().replace("\\", "/")
         gp = gp[2:] if gp.startswith("./") else gp
         if gp.startswith(("frontend/", "backend/")):
             return gp
-        prefix = self._target_repo_prefix(target_file)
-        return f"{prefix}/{gp}"
+        prefix = self._target_repo_prefix(target_file, repo_dir)
+        return self._apply_prefix(prefix, gp)
 
-    def _is_cross_repo_generated_file(self, generated_full_path: str, target_file: str) -> bool:
+    def _is_cross_repo_generated_file(self, generated_full_path: str, target_file: str, repo_dir: Optional[str] = None) -> bool:
         """Reject generated files that cross repo boundaries for a single-file task."""
-        target_prefix = self._target_repo_prefix(target_file)
+        target_prefix = self._target_repo_prefix(target_file, repo_dir)
+        if not target_prefix:
+            return False
         return not generated_full_path.startswith(f"{target_prefix}/")
     
     def update_error_history(self, job_id: str, all_errors: List[str], repo_dir: str):
@@ -770,6 +810,8 @@ class DeploymentFixer:
     def _build_batch_fix_prompt(self, batch: List[tuple], yaml_context: str = "", story_context: str = "", fix_history: dict = None, code_history: dict = None, error_history: dict = None, repo_dir: str = None) -> str:
         """Build prompt for fixing multiple files at once with full context and history"""
         prompt = "You are a senior software engineer fixing bugs in an autonomous development environment.\n\n"
+        prompt += "REPOSITORY PATH RULE: Use repository-root FILE_PATH values only.\n"
+        prompt += "Do NOT prefix FILE_PATH with 'backend/' or 'frontend/'.\n\n"
         
         # Add context FIRST so AI understands the requirements
         if yaml_context:
@@ -889,10 +931,10 @@ class DeploymentFixer:
                 content = parsed_file.get('content')
                 if not raw_path or content is None:
                     continue
-                full_path = self._coerce_generated_path(raw_path, target_file)
+                full_path = self._coerce_generated_path(raw_path, target_file, repo_dir)
 
                 # Never apply cross-repo files in this context.
-                if self._is_cross_repo_generated_file(full_path, target_file):
+                if self._is_cross_repo_generated_file(full_path, target_file, repo_dir):
                     continue
 
                 if self._paths_match(full_path, target_file):
@@ -1170,6 +1212,8 @@ class DeploymentFixer:
         prompt = "You are a PRODUCTION CODE FIXER. CRITICAL: All errors MUST be COMPLETELY resolved.\n"
         prompt += "PARTIAL FIXES ARE FAILURES - changing errors without eliminating them causes deployment to fail.\n"
         prompt += "If you can't fix ALL errors completely, say so explicitly.\n\n"
+        prompt += "REPOSITORY PATH RULE: output FILE_PATH must be repository-root relative.\n"
+        prompt += "Never prefix FILE_PATH with 'backend/' or 'frontend/'.\n\n"
         
         # CRITICAL: Add technical skill/config context FIRST with strong emphasis
         prompt += "🚨 MANDATORY TECHNICAL REQUIREMENTS 🚨\n"
@@ -1349,16 +1393,24 @@ class DeploymentFixer:
             if redundant_context:
                 prompt += redundant_context
 
+        output_file_path = file_path
+        if output_file_path.startswith("backend/"):
+            output_file_path = output_file_path[len("backend/"):]
+        elif output_file_path.startswith("frontend/"):
+            output_file_path = output_file_path[len("frontend/"):]
+
         prompt += "Output format:\n"
         prompt += "ROOT_CAUSE: <Why these errors exist - the fundamental problem>\n"
         prompt += "COMPLETE_FIX: <Exact changes that will eliminate ALL errors listed above>\n"
         prompt += "VERIFICATION: <How you verified ALL errors will be gone after this fix>\n\n"
-        prompt += f"FILE_PATH: {file_path}\n---\n[COMPLETE ERROR-FREE CODE]\n---\n"
+        prompt += f"FILE_PATH: {output_file_path}\n---\n[COMPLETE ERROR-FREE CODE]\n---\n"
         return prompt
     
     def _parse_all_errors(self, errors: List[str], repo_dir: str) -> Dict[str, Dict]:
         """Parse ALL error types with proper path normalization and CROSS-FILE dependency detection"""
         files = {}
+        backend_prefix = self._backend_prefix(repo_dir)
+        frontend_prefix = self._frontend_prefix(repo_dir)
 
         def _safe_read(local_path: str) -> str:
             """Read file content only when path is a regular file."""
@@ -1379,7 +1431,7 @@ class DeploymentFixer:
                 filename = mandatory_match.group(1)
                 description = mandatory_match.group(2)
                 # These files live at the root of the frontend directory
-                file_path = f"frontend/{filename}"
+                file_path = self._apply_prefix(frontend_prefix, filename)
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
                     content = _safe_read(local)
@@ -1393,7 +1445,7 @@ class DeploymentFixer:
             concat_match = re.search(r"AI Concatenation Error in '([^']+)'", error)
             if concat_match:
                 file_path = concat_match.group(1)
-                file_path = self._normalize_file_path(file_path)
+                file_path = self._normalize_file_path(file_path, repo_dir)
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
@@ -1408,7 +1460,7 @@ class DeploymentFixer:
                 r"Invalid pip requirement in 'requirements\.txt': '([^']+)'", error
             )
             if invalid_pip_match:
-                file_path = "backend/requirements.txt"
+                file_path = self._apply_prefix(backend_prefix, "requirements.txt")
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
                     content = _safe_read(local)
@@ -1417,14 +1469,27 @@ class DeploymentFixer:
                     f"Strip invalid pip line: '{invalid_pip_match.group(1)}'"
                 )
                 continue
+            if "Runtime pip install failure in requirements.txt" in error:
+                file_path = self._apply_prefix(backend_prefix, "requirements.txt")
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                files[file_path]['missing'].append("Runtime pip install failure: sanitize invalid/deprecated requirements entries")
+                continue
             # Missing dependency
             if "Missing dependency:" in error:
                 pkg_match = re.search(r"Missing dependency: '([^']+)'", error)
                 if pkg_match:
                     pkg = pkg_match.group(1)
+                    if self._is_frontend_alias_package(pkg):
+                        continue
                     if pkg == "google":
                         pkg = "google-cloud-firestore"
-                    file_path = "backend/requirements.txt" if "requirements.txt" in error else "frontend/package.json"
+                    if "requirements.txt" in error:
+                        file_path = self._apply_prefix(backend_prefix, "requirements.txt")
+                    else:
+                        file_path = self._apply_prefix(frontend_prefix, "package.json")
                     
                     if file_path not in files:
                         local = os.path.join(repo_dir, file_path)
@@ -1439,7 +1504,7 @@ class DeploymentFixer:
             json_syntax_match = re.search(r"Invalid package\.json: JSON parsing failed \(([^)]+)\)", error)
             if json_syntax_match:
                 details = json_syntax_match.group(1)
-                file_path = "frontend/package.json"
+                file_path = self._apply_prefix(frontend_prefix, "package.json")
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
                     content = _safe_read(local)
@@ -1451,24 +1516,72 @@ class DeploymentFixer:
             dir_match = re.search(r"(?:ENVIRONMENT ERROR: )?Missing mandatory directory: Frontend must have either an 'app' directory \(App Router\) or 'pages' directory \(Pages Router\)", error)
             if dir_match:
                 # Target the most common entry point to force creation of the directory
-                file_path = "frontend/app/page.tsx"
+                file_path = self._apply_prefix(frontend_prefix, "app/page.tsx")
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
                     content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(
-                    "Missing mandatory routing directory (app/ or pages/). CREATE 'frontend/app/page.tsx' with a basic Next.js page component to establish the App Router."
+                    "Missing mandatory routing directory (app/ or pages/). CREATE 'app/page.tsx' with a basic Next.js page component to establish the App Router."
                 )
                 continue
 
             # NEW: Missing node_modules bootstrapping
             if "Missing 'node_modules'" in error:
-                file_path = "frontend/package.json"
+                file_path = self._apply_prefix(frontend_prefix, "package.json")
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
                     content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content, 'packages': set()}
                 files[file_path]['missing'].append("Missing 'node_modules': Forces fresh dependency installation.")
+                continue
+
+            # Python syntax errors from validator:
+            # "SyntaxError in 'app.py' at line 1: invalid syntax"
+            syntax_match = re.search(r"SyntaxError in '([^']+)' at line (\d+): (.+)", error)
+            if syntax_match:
+                syntax_target = syntax_match.group(1).strip()
+                if syntax_target.startswith("backend/"):
+                    file_path = syntax_target
+                elif "/" in syntax_target:
+                    file_path = self._apply_prefix(backend_prefix, syntax_target)
+                elif syntax_target.endswith(".py"):
+                    if "." in syntax_target[:-3] and "/" not in syntax_target:
+                        syntax_target = syntax_target[:-3].replace(".", "/") + ".py"
+                    file_path = self._apply_prefix(backend_prefix, syntax_target)
+                else:
+                    file_path = self._apply_prefix(backend_prefix, f"{syntax_target}.py")
+                file_path = self._normalize_file_path(file_path, repo_dir)
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(error)
+                continue
+
+            runtime_name_match = re.search(
+                r"RuntimeNameError in '([^']+)': name '([^']+)' is not defined",
+                error
+            )
+            if runtime_name_match:
+                target = runtime_name_match.group(1).strip()
+                missing_name = runtime_name_match.group(2).strip()
+                if target.startswith("backend/"):
+                    file_path = target
+                elif "/" in target:
+                    file_path = self._apply_prefix(backend_prefix, target)
+                elif target.endswith(".py"):
+                    if "." in target[:-3] and "/" not in target:
+                        target = target[:-3].replace(".", "/") + ".py"
+                    file_path = self._apply_prefix(backend_prefix, target)
+                else:
+                    file_path = self._apply_prefix(backend_prefix, f"{target}.py")
+                file_path = self._normalize_file_path(file_path, repo_dir)
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(f"NameError: '{missing_name}' is not defined")
                 continue
             match = re.search(r"ImportError in '([^']+)': '([^']+)' not found in '([^']+)'", error)
             if match:
@@ -1484,7 +1597,7 @@ class DeploymentFixer:
                 
                 # PRIMARY FIX: The dependency file that's missing the export
                 file_path = self._resolve_import_path(src_module, target_module, repo_dir)
-                file_path = self._normalize_file_path(file_path)
+                file_path = self._normalize_file_path(file_path, repo_dir)
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
@@ -1527,7 +1640,7 @@ class DeploymentFixer:
                 
                 if is_package:
                     # This is a missing pip package, not a file!
-                    file_path = "backend/requirements.txt"
+                    file_path = self._apply_prefix(backend_prefix, "requirements.txt")
                     if file_path not in files:
                         local = os.path.join(repo_dir, file_path)
                         content = _safe_read(local)
@@ -1558,16 +1671,17 @@ class DeploymentFixer:
                     continue
                 
                 # It's a local file that needs to be created
-                file_path = f"backend/{missing_file}"
-                file_path = self._normalize_file_path(file_path)
+                file_path = self._apply_prefix(backend_prefix, missing_file)
+                file_path = self._normalize_file_path(file_path, repo_dir)
                 # Avoid creating a top-level module file that shadows an existing package directory.
                 # Example: creating backend/routes.py breaks "from routes import auth_routes"
                 # when backend/routes/ already exists.
-                if file_path.startswith("backend/") and file_path.endswith(".py"):
+                if file_path.endswith(".py"):
                     module_name = os.path.basename(file_path)[:-3]
-                    package_dir = os.path.join(repo_dir, "backend", module_name)
+                    package_root = os.path.join(repo_dir, backend_prefix) if backend_prefix else repo_dir
+                    package_dir = os.path.join(package_root, module_name)
                     if os.path.isdir(package_dir):
-                        file_path = f"backend/{module_name}/__init__.py"
+                        file_path = self._apply_prefix(backend_prefix, f"{module_name}/__init__.py")
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
@@ -1595,14 +1709,32 @@ class DeploymentFixer:
                 module_base = file_with_error
                 if module_base.endswith('.py'):
                     module_base = module_base[:-3]
-                file_path = f"backend/{module_base.replace('.', '/')}.py"
-                file_path = self._normalize_file_path(file_path)
+                file_path = self._apply_prefix(backend_prefix, f"{module_base.replace('.', '/')}.py")
+                file_path = self._normalize_file_path(file_path, repo_dir)
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
                     content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(f"Fix import: Change 'from backend.{wrong_import}' to 'from {correct_import}'")
+                continue
+
+            # main.py relative import error:
+            # "ImportError in 'main.py': Using 'from .env' - main.py is the entry point and CANNOT use relative imports..."
+            main_relative_match = re.search(
+                r"ImportError in 'main\.py': Using 'from (\.[^']+)' - main\.py is the entry point and CANNOT use relative imports",
+                error
+            )
+            if main_relative_match:
+                rel_import = main_relative_match.group(1)
+                file_path = self._apply_prefix(backend_prefix, "main.py")
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(
+                    f"CANNOT use relative imports in main.py ({rel_import}); convert to absolute import"
+                )
                 continue
             
             # Legacy pattern kept for backwards compatibility
@@ -1613,8 +1745,8 @@ class DeploymentFixer:
                 correct_import = wrong_import_legacy.group(3)
                 
                 # The file that has the wrong import
-                file_path = f"backend/{file_with_error.replace('.', '/')}.py"
-                file_path = self._normalize_file_path(file_path)
+                file_path = self._apply_prefix(backend_prefix, f"{file_with_error.replace('.', '/')}.py")
+                file_path = self._normalize_file_path(file_path, repo_dir)
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
@@ -1627,8 +1759,43 @@ class DeploymentFixer:
             tsc_match = re.search(r"TypeScript error in '([^']+)' at", error)
             if tsc_match:
                 importer_rel = tsc_match.group(1)
-                importer_path = f"frontend/{importer_rel}" if not importer_rel.startswith('frontend/') else importer_rel
-                importer_path = self._normalize_file_path(importer_path)
+                if frontend_prefix:
+                    importer_path = importer_rel if importer_rel.startswith(f"{frontend_prefix}/") else f"{frontend_prefix}/{importer_rel}"
+                else:
+                    importer_path = importer_rel[9:] if importer_rel.startswith("frontend/") else importer_rel
+                importer_path = self._normalize_file_path(importer_path, repo_dir)
+
+                # Missing type declarations (TS7016) - add @types package.
+                decl_match = re.search(r"Could not find a declaration file for module '([^']+)'", error)
+                if decl_match:
+                    module_name = decl_match.group(1).strip()
+                    if module_name.startswith('@'):
+                        # Scoped package => @types/scope__name
+                        parts = module_name.split('/', 1)
+                        if len(parts) == 2:
+                            types_pkg = f"@types/{parts[0][1:]}__{parts[1]}"
+                        else:
+                            types_pkg = f"@types/{module_name[1:]}"
+                    else:
+                        types_pkg = f"@types/{module_name}"
+                    file_path = self._apply_prefix(frontend_prefix, "package.json")
+                    if file_path not in files:
+                        local = os.path.join(repo_dir, file_path)
+                        content = _safe_read(local)
+                        files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                    files[file_path]['packages'].add(types_pkg)
+                    continue
+
+                # JSX intrinsic errors often mean React types are missing.
+                if "JSX.IntrinsicElements" in error:
+                    file_path = self._apply_prefix(frontend_prefix, "package.json")
+                    if file_path not in files:
+                        local = os.path.join(repo_dir, file_path)
+                        content = _safe_read(local)
+                        files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                    files[file_path]['packages'].add("@types/react")
+                    files[file_path]['packages'].add("@types/react-dom")
+                    continue
 
                 # Check if it's a "missing exported member" error and route to dependency file.
                 export_match = re.search(r"2305:\s*Module '\"?([^']+)\"?' has no exported member '([^']+)'", error)
@@ -1636,7 +1803,7 @@ class DeploymentFixer:
                     target_module = export_match.group(1).strip().strip('"')
                     missing_export = export_match.group(2).strip()
                     dep_path = self._resolve_import_path(importer_path, target_module, repo_dir)
-                    dep_path = self._normalize_file_path(dep_path)
+                    dep_path = self._normalize_file_path(dep_path, repo_dir)
                     if dep_path not in files:
                         local = os.path.join(repo_dir, dep_path)
                         content = _safe_read(local)
@@ -1649,9 +1816,9 @@ class DeploymentFixer:
                 if module_match:
                     missing_module = module_match.group(1)
                     # Local alias/path imports are not npm packages; treat them as missing local modules.
-                    if missing_module.startswith(('@/','./','../','~/', '/')):
+                    if self._is_frontend_alias_package(missing_module) or missing_module.startswith(('./', '../')):
                         dep_path = self._resolve_import_path(importer_path, missing_module, repo_dir)
-                        dep_path = self._normalize_file_path(dep_path)
+                        dep_path = self._normalize_file_path(dep_path, repo_dir)
                         if dep_path not in files:
                             local = os.path.join(repo_dir, dep_path)
                             content = _safe_read(local)
@@ -1669,9 +1836,41 @@ class DeploymentFixer:
                             parts = missing_module.split('/')
                             if len(parts) >= 2:
                                 pkg = f"{parts[0]}/{parts[1]}"
+                    if self._is_frontend_alias_package(pkg):
+                        continue
 
-                    # This is a missing package - add to package.json
-                    file_path = "frontend/package.json"
+                    # Check whether the package is already installed in package.json.
+                    # If it is, the problem is a bad internal sub-path import in the SOURCE FILE
+                    # (e.g. `import X from '@headlessui/react/dist/components/description'` when
+                    # @headlessui/react is installed but that deep path doesn't exist).
+                    # In that case route the error to the source file for AI to fix, NOT package.json.
+                    pj_local = os.path.join(
+                        repo_dir,
+                        frontend_prefix,
+                        "package.json"
+                    ) if frontend_prefix else os.path.join(repo_dir, "package.json")
+                    try:
+                        with open(pj_local, 'r', encoding='utf-8') as _pjf:
+                            _pj = json.load(_pjf)
+                        installed_deps = {
+                            **_pj.get('dependencies', {}),
+                            **_pj.get('devDependencies', {}),
+                        }
+                    except Exception:
+                        installed_deps = {}
+
+                    if pkg in installed_deps:
+                        # Package exists – the import path itself is wrong; fix the source file.
+                        src_file_path = self._normalize_file_path(importer_path, repo_dir)
+                        if src_file_path not in files:
+                            local = os.path.join(repo_dir, src_file_path)
+                            content = _safe_read(local)
+                            files[src_file_path] = {'missing': [], 'content': content}
+                        files[src_file_path]['missing'].append(error)
+                        continue
+
+                    # Package is genuinely missing - add to package.json
+                    file_path = self._apply_prefix(frontend_prefix, "package.json")
                     if file_path not in files:
                         local = os.path.join(repo_dir, file_path)
                         content = _safe_read(local)
@@ -1681,62 +1880,150 @@ class DeploymentFixer:
                 
                 # Regular TypeScript error
                 file_rel = importer_rel
-                file_path = f"frontend/{file_rel}" if not file_rel.startswith('frontend/') else file_rel
-                file_path = self._normalize_file_path(file_path)
+                if frontend_prefix:
+                    file_path = file_rel if file_rel.startswith(f"{frontend_prefix}/") else f"{frontend_prefix}/{file_rel}"
+                else:
+                    file_path = file_rel[9:] if file_rel.startswith("frontend/") else file_rel
+                file_path = self._normalize_file_path(file_path, repo_dir)
                 
                 if file_path not in files:
                     local = os.path.join(repo_dir, file_path)
                     content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(error)
-        
+                continue
+
+            # PropertyError from _validate_typescript_properties:
+            # "PropertyError in 'src/components/Foo.tsx': 'bar' does not exist on type 'Baz'. Did you mean 'baz'?"
+            prop_match = re.search(r"PropertyError in '([^']+)':", error)
+            if prop_match:
+                prop_rel = prop_match.group(1)
+                if frontend_prefix:
+                    file_path = prop_rel if prop_rel.startswith(f"{frontend_prefix}/") else f"{frontend_prefix}/{prop_rel}"
+                else:
+                    file_path = prop_rel[9:] if prop_rel.startswith("frontend/") else prop_rel
+                file_path = self._normalize_file_path(file_path, repo_dir)
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(error)
+                continue
+
+            # TypeError from _validate_frontend_dependencies (function arity check):
+            # "TypeError in 'app/tickets/page.tsx': Function 'getTickets' expects at least 2 arguments, but found 1."
+            type_err_match = re.search(r"TypeError in '([^']+)':", error)
+            if type_err_match:
+                type_rel = type_err_match.group(1)
+                if frontend_prefix:
+                    file_path = type_rel if type_rel.startswith(f"{frontend_prefix}/") else f"{frontend_prefix}/{type_rel}"
+                else:
+                    file_path = type_rel[9:] if type_rel.startswith("frontend/") else type_rel
+                file_path = self._normalize_file_path(file_path, repo_dir)
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(error)
+
         return files
     
     async def _refresh_frontend_dependencies(self, repo_dir: str, job_id: str) -> bool:
         """Shared frontend dependency refresh logic (programmatic or worker)."""
         frontend_dir = os.path.join(repo_dir, 'frontend')
         package_json = os.path.join(frontend_dir, 'package.json')
+        if not os.path.exists(package_json) and os.path.exists(os.path.join(repo_dir, 'package.json')):
+            frontend_dir = repo_dir
+            package_json = os.path.join(frontend_dir, 'package.json')
         if not os.path.exists(package_json):
             return False
 
         # Always use npm install instead of npm ci in the auto-fix loop. 
         # npm ci is too fragile as it requires package.json and package-lock.json to be in exact sync,
         # which is frequently not the case when AI is adding/removing dependencies.
-        npm_cmd = ['npm', 'install', '--prefer-offline', '--no-audit']
+        npm_cmd = ['npm', 'install', '--prefer-offline', '--no-audit', '--legacy-peer-deps']
         try:
-            self._safe_log(job_id, f"📦 Refreshing frontend deps in {repo_dir} ({' '.join(npm_cmd)})", "Environment")
-            process = await asyncio.create_subprocess_exec(
-                *npm_cmd,
-                cwd=frontend_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await process.communicate()
-            
-            if process.returncode != 0:
-                fallback_cmd = ['npm', 'install', '--prefer-offline', '--no-audit']
-                self._safe_log(job_id, f"⚠️ Dependency refresh failed (rc={process.returncode}), retrying with {' '.join(fallback_cmd)}", "Environment", level="WARNING")
-                self._safe_log(job_id, f"Error details: {stderr.decode()[:1000]}", "Environment", level="DEBUG")
-                
-                fallback_proc = await asyncio.create_subprocess_exec(
-                    *fallback_cmd,
+            for attempt in range(1, 3):
+                self._safe_log(job_id, f"📦 Refreshing frontend deps in {repo_dir} ({' '.join(npm_cmd)})", "Environment")
+                process = await asyncio.create_subprocess_exec(
+                    *npm_cmd,
                     cwd=frontend_dir,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                f_stdout, f_stderr = await fallback_proc.communicate()
-                
-                if fallback_proc.returncode != 0:
-                    self._safe_log(job_id, f"❌ Dependency refresh failed: {f_stderr.decode()[:1000]}", "Environment", level="ERROR")
+                _, stderr = await process.communicate()
+                stderr_text = (stderr or b"").decode(errors='replace')
+                if process.returncode == 0:
+                    self._safe_log(job_id, "✅ Successfully refreshed frontend dependencies", "Environment")
+                    return True
+
+                self._safe_log(job_id, f"⚠️ Dependency refresh failed (rc={process.returncode})", "Environment", level="WARNING")
+                self._safe_log(job_id, f"Error details: {stderr_text[:1000]}", "Environment", level="DEBUG")
+
+                # Auto-recover from package names not found in npm registry.
+                bad_pkg = None
+                e404_match = re.search(r"'([^']+@\S+)' is not in this registry", stderr_text)
+                if e404_match:
+                    spec = e404_match.group(1)
+                    if spec.startswith('@'):
+                        at_idx = spec.find('@', 1)
+                        bad_pkg = spec if at_idx == -1 else spec[:at_idx]
+                    else:
+                        bad_pkg = spec.split('@', 1)[0]
+                if bad_pkg is None:
+                    url_match = re.search(r"registry\.npmjs\.org/([^\s]+)\s+-\s+Not found", stderr_text)
+                    if url_match:
+                        bad_pkg = unquote(url_match.group(1))
+
+                # ETARGET: version constraint exists in registry but the specific version does not.
+                # e.g. "No matching version found for qs@~6.14.1"
+                # Remove the package from package.json so npm can resolve transitive deps freely.
+                if bad_pkg is None and 'ETARGET' in stderr_text:
+                    etarget_match = re.search(r"No matching version found for ([^\s.]+)", stderr_text)
+                    if etarget_match:
+                        spec = etarget_match.group(1)
+                        if spec.startswith('@'):
+                            at_idx = spec.find('@', 1)
+                            bad_pkg = spec if at_idx == -1 else spec[:at_idx]
+                        else:
+                            bad_pkg = spec.split('@', 1)[0]
+
+                if bad_pkg and (self._is_frontend_alias_package(bad_pkg) or bad_pkg):
+                    try:
+                        with open(package_json, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        deps = data.get('dependencies', {})
+                        dev_deps = data.get('devDependencies', {})
+                        removed = False
+                        if bad_pkg in deps:
+                            del deps[bad_pkg]
+                            removed = True
+                        if bad_pkg in dev_deps:
+                            del dev_deps[bad_pkg]
+                            removed = True
+                        if removed:
+                            data['dependencies'] = deps
+                            data['devDependencies'] = dev_deps
+                            with open(package_json, 'w', encoding='utf-8') as f:
+                                json.dump(data, f, indent=2)
+                                f.write('\n')
+                            self._invalid_npm_packages.add(bad_pkg)
+                            self._safe_log(job_id, f"🧹 Removed invalid npm alias package '{bad_pkg}' and retrying install", "Environment")
+                            continue
+                    except Exception as e:
+                        self._safe_log(job_id, f"⚠️ Failed package.json cleanup after npm E404: {e}", "Environment", level="WARNING")
+
+                # No recoverable cleanup or cleanup failed.
+                if attempt >= 2:
+                    self._safe_log(job_id, f"❌ Dependency refresh failed: {stderr_text[:1000]}", "Environment", level="ERROR")
                     return False
             
-            self._safe_log(job_id, "✅ Successfully refreshed frontend dependencies", "Environment")
-            return True
+            return False
         except Exception as e:
             self._safe_log(job_id, f"❌ Dependency refresh error: {e}", "Environment", level="ERROR")
             return False
 
-    def _normalize_file_path(self, path: str) -> str:
+    def _normalize_file_path(self, path: str, repo_dir: Optional[str] = None) -> str:
         """Normalize file path to prevent duplication (e.g., frontend/src/src/api -> frontend/src/api)"""
         # Remove duplicate path segments and current directory markers
         parts = path.split('/')
@@ -1751,27 +2038,36 @@ class DeploymentFixer:
                 normalized.append(part)
         
         result = '/'.join(normalized)
-        
-        # Ensure proper prefix structure
-        if result.startswith('frontend/'):
-            # Frontend files should be: frontend/src/... or frontend/package.json etc.
-            after_frontend = result[9:]  # Remove 'frontend/'
-            
-            # 1. Config files at root OR files already in src/, app/, or pages/ are fine
-            if after_frontend.startswith(('src/', 'app/', 'pages/', 'package.json', 'package-lock.json', 'tsconfig.json', 'jsconfig.json', 'next.config', 'public/')):
-                return result
-            
-            # 2. Known App Router files without prefix should go to app/
+
+        prefixes = self._repo_prefixes(repo_dir)
+        frontend_prefix = prefixes["frontend"]
+        backend_prefix = prefixes["backend"]
+        had_frontend_prefix = result.startswith("frontend/")
+        had_backend_prefix = result.startswith("backend/")
+        if had_frontend_prefix:
+            result = result[9:]
+        if had_backend_prefix:
+            result = result[8:]
+
+        is_backend = had_backend_prefix or result.endswith('.py')
+        is_frontend = had_frontend_prefix or not is_backend
+
+        if is_frontend:
+            # Frontend files should be: src/... or app/... or pages/... or config files at root
+            if result.startswith(('src/', 'app/', 'pages/', 'package.json', 'package-lock.json', 'tsconfig.json', 'jsconfig.json', 'next.config', 'public/')):
+                return self._apply_prefix(frontend_prefix, result)
+
             app_router_files = ('layout.tsx', 'layout.jsx', 'page.tsx', 'page.jsx', 'loading.tsx', 'loading.jsx', 'error.tsx', 'error.jsx', 'not-found.tsx', 'global.css', 'globals.css')
-            if after_frontend in app_router_files:
-                return f"frontend/app/{after_frontend}"
-                
-            # 3. Everything else defaults to src/
-            result = f"frontend/src/{after_frontend}"
-        elif result.startswith('backend/'):
-            # Backend files are fine as-is
-            pass
-        
+            if result in app_router_files:
+                return self._apply_prefix(frontend_prefix, f"app/{result}")
+
+            return self._apply_prefix(frontend_prefix, f"src/{result}")
+        elif is_backend:
+            backend_rest = result
+            if backend_rest.endswith('.py') and '/' not in backend_rest and '.' in backend_rest[:-3]:
+                backend_rest = backend_rest[:-3].replace('.', '/') + '.py'
+            return self._apply_prefix(backend_prefix, backend_rest)
+
         return result
     
     def _extract_dependency_files_from_errors(self, errors: List[str], current_file: str, repo_dir: str) -> Dict[str, List[str]]:
@@ -1792,7 +2088,7 @@ class DeploymentFixer:
                 
                 # Resolve the dependency file path
                 dep_file_path = self._resolve_import_path(current_file, target_module, repo_dir)
-                dep_file_path = self._normalize_file_path(dep_file_path)
+                dep_file_path = self._normalize_file_path(dep_file_path, repo_dir)
                 
                 # Add to dict
                 if dep_file_path not in dependency_files:
@@ -1803,6 +2099,8 @@ class DeploymentFixer:
     
     def _resolve_import_path(self, importer: str, target: str, repo_dir: str) -> str:
         """Resolve import to file path with robust prefix handling."""
+        frontend_prefix = self._frontend_prefix(repo_dir)
+        backend_prefix = self._backend_prefix(repo_dir)
         def _pick_existing_frontend_file(base_no_ext: str) -> str:
             candidates = [
                 f"{base_no_ext}.ts",
@@ -1830,14 +2128,16 @@ class DeploymentFixer:
             if clean_target.endswith('.py'):
                 clean_target = clean_target[:-3]
                 
-            return f"backend/{clean_target.replace('.', '/')}.py"
+            return self._apply_prefix(backend_prefix, f"{clean_target.replace('.', '/')}.py")
         else:
             importer_norm = importer.replace("\\", "/")
-            if not importer_norm.startswith("frontend/"):
+            if importer_norm.startswith("frontend/") and not frontend_prefix:
+                importer_norm = importer_norm[9:]
+            if frontend_prefix and not importer_norm.startswith(f"{frontend_prefix}/"):
                 if importer_norm.startswith("src/") or importer_norm.startswith("app/"):
-                    importer_norm = f"frontend/{importer_norm}"
+                    importer_norm = f"{frontend_prefix}/{importer_norm}"
                 else:
-                    importer_norm = f"frontend/src/{importer_norm.lstrip('./')}"
+                    importer_norm = f"{frontend_prefix}/src/{importer_norm.lstrip('./')}"
 
             target_norm = target.replace("\\", "/")
 
@@ -1849,16 +2149,21 @@ class DeploymentFixer:
 
             # Handle @/ alias (Next.js)
             if target_norm.startswith("@/"):
-                alias_base = f"frontend/src/{target_norm[2:]}"
+                alias_base = self._apply_prefix(frontend_prefix, f"src/{target_norm[2:]}")
+                return _pick_existing_frontend_file(alias_base)
+
+            # Handle ~/ alias often used as src root alias.
+            if target_norm.startswith("~/"):
+                alias_base = self._apply_prefix(frontend_prefix, f"src/{target_norm[2:]}")
                 return _pick_existing_frontend_file(alias_base)
 
             # Handle direct src/* imports
             if target_norm.startswith("src/"):
-                src_base = f"frontend/{target_norm}"
+                src_base = self._apply_prefix(frontend_prefix, target_norm)
                 return _pick_existing_frontend_file(src_base)
 
             # Fallback to frontend/src/<target>
-            return _pick_existing_frontend_file(f"frontend/src/{target_norm}")
+            return _pick_existing_frontend_file(self._apply_prefix(frontend_prefix, f"src/{target_norm}"))
     
     def _is_test_file(self, file_path: str) -> bool:
         """Check if file is a test file"""
@@ -1893,7 +2198,7 @@ class DeploymentFixer:
         if file_path.endswith(('requirements.txt', 'package.json')):
             return True
         # Missing mandatory frontend config files - always create programmatically
-        if file_path in ('frontend/next.config.js', 'frontend/tsconfig.json'):
+        if file_path in ('frontend/next.config.js', 'frontend/tsconfig.json', 'next.config.js', 'tsconfig.json'):
             return True
         if file_path.endswith('.py') and '/models/' in file_path:
             return True
@@ -1901,6 +2206,8 @@ class DeploymentFixer:
             return True
         # NEW: Python shim files with missing exports - fix without AI to avoid credit waste
         if file_path.endswith('.py') and any('Missing export:' in err for err in missing_items):
+            return True
+        if file_path.endswith('.py') and any('SyntaxError in' in err for err in missing_items):
             return True
         # Deterministic fix: main.py cannot use relative imports (from .x import y).
         if file_path.endswith('main.py') and any('CANNOT use relative imports' in err for err in missing_items):
@@ -1915,6 +2222,9 @@ class DeploymentFixer:
             token in err for err in missing_items for token in ("'>' expected", "')' expected", "Property assignment expected")
         ):
             return True
+        # Deterministic fix for missing TS exports in non-type files (e.g., src/api/*.ts).
+        if file_path.endswith(('.ts', '.tsx')) and any(('Missing export:' in err) or ('not found in' in err) for err in missing_items):
+            return True
         # Deterministic fix for auth page/component prop contract drift:
         # Type '{}' is missing required FormProps when rendering <LoginForm /> etc.
         if file_path.endswith(('.tsx', '.jsx')) and any(
@@ -1927,6 +2237,8 @@ class DeploymentFixer:
             if any('Missing export:' in err or 'not found in' in err for err in missing_items):
                 return True
             if any("*/ expected" in err for err in missing_items):
+                return True
+            if any("Expression expected" in err or "Unterminated regular expression literal" in err for err in missing_items):
                 return True
             return len(file_content) < 500
         # NEW: Try programmatic fix for files with "from backend.X" errors
@@ -1945,9 +2257,9 @@ class DeploymentFixer:
             elif file_path.endswith('package.json'):
                 return await self._fix_package_json(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # Missing mandatory frontend configuration files - create with known-good boilerplate
-            elif file_path == 'frontend/next.config.js':
+            elif file_path in ('frontend/next.config.js', 'next.config.js'):
                 return await self._create_next_config(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
-            elif file_path == 'frontend/tsconfig.json':
+            elif file_path in ('frontend/tsconfig.json', 'tsconfig.json'):
                 return await self._create_tsconfig(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for AI Concatenation Errors
             elif any("AI Concatenation Error" in str(err) for err in file_info.get('missing', [])):
@@ -1958,7 +2270,26 @@ class DeploymentFixer:
                 return await self._create_missing_backend_module(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Python files with "Missing export:" — append stubs without touching the AI
             elif file_path.endswith('.py') and any('Missing export:' in str(err) for err in file_info.get('missing', [])):
+                if any('SyntaxError in' in str(err) for err in file_info.get('missing', [])):
+                    await self._fix_python_syntax_artifacts(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+                    local = os.path.join(repo_dir, file_path)
+                    if os.path.exists(local):
+                        try:
+                            with open(local, 'r', encoding='utf-8') as f:
+                                file_info = {**file_info, 'content': f.read()}
+                        except Exception:
+                            pass
                 return await self._fix_python_missing_exports(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith('.py') and any('SyntaxError in' in str(err) for err in file_info.get('missing', [])):
+                if any('parameter without a default follows parameter with a default' in str(err) for err in file_info.get('missing', [])):
+                    return await self._fix_python_parameter_order(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+                if any(
+                    ('unterminated triple-quoted f-string literal' in str(err)) or
+                    ('unterminated triple-quoted string literal' in str(err))
+                    for err in file_info.get('missing', [])
+                ):
+                    return await self._fix_python_unterminated_triple_quote(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+                return await self._fix_python_syntax_artifacts(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('main.py') and any('CANNOT use relative imports' in str(err) for err in file_info.get('missing', [])):
                 return await self._fix_main_relative_imports(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.test.tsx', '.test.ts')):
@@ -1969,6 +2300,8 @@ class DeploymentFixer:
                 token in str(err) for err in file_info.get('missing', []) for token in ("'>' expected", "')' expected", "Property assignment expected")
             ):
                 return await self._fix_ts_with_jsx_syntax(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.ts', '.tsx')) and any((('Missing export:' in str(err)) or ('not found in' in str(err))) for err in file_info.get('missing', [])) and '/types/' not in file_path:
+                return await self._fix_ts_missing_exports(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.tsx', '.jsx')) and any(
                 ("Type '{}' is missing the following properties from type" in str(err) and "FormProps" in str(err))
                 for err in file_info.get('missing', [])
@@ -2036,7 +2369,7 @@ class DeploymentFixer:
             if is_marker and next_path:
                 if current_lines:
                     segments.append((current_path, '\\n'.join(current_lines)))
-                current_path = self._coerce_generated_path(next_path, file_path)
+                current_path = self._coerce_generated_path(next_path, file_path, repo_dir)
                 current_lines = []
             else:
                 current_lines.append(line)
@@ -2144,11 +2477,18 @@ class DeploymentFixer:
 
         cleaned_lines = []
         content_was_dirty = False
+        removed_invalid_runtime_pkg = False
         for line in content.splitlines():
             stripped = line.strip()
             if _is_invalid_req_line(stripped):
                 content_was_dirty = True
                 continue  # Drop the bad line
+            # Remove deprecated/invalid meta packages that commonly break pip builds.
+            if re.fullmatch(r"azure(\s*(==|>=|<=|~=).*)?", stripped, flags=re.IGNORECASE):
+                removed_invalid_runtime_pkg = True
+                content_was_dirty = True
+                self._safe_log(job_id, "🧹 Removed deprecated 'azure' meta-package from requirements.txt", "Requirements Cleanup")
+                continue
             cleaned_lines.append(line)
         if content_was_dirty:
             content = '\n'.join(cleaned_lines)
@@ -2200,6 +2540,8 @@ class DeploymentFixer:
             'google.cloud.storage': 'google-cloud-storage',
             'google.cloud.secretmanager': 'google-cloud-secret-manager',
             'firebase_admin': 'firebase-admin',
+            'azure.storage.blob': 'azure-storage-blob',
+            'azure': 'azure-storage-blob',
             
             # HTTP Clients
             'requests': 'requests',
@@ -2254,6 +2596,12 @@ class DeploymentFixer:
             if not re.search(rf'^{re.escape(real_pkg)}(\[.*\])?([<>=!].*)?$', content, re.MULTILINE):
                 content += f"\n{real_pkg}"
         
+        if removed_invalid_runtime_pkg and not any(
+            re.search(r'^azure-storage-blob([<>=!].*)?$', ln.strip(), re.IGNORECASE)
+            for ln in content.splitlines()
+        ):
+            content += "\nazure-storage-blob"
+
         if content == original_content:
             return False
 
@@ -2374,6 +2722,18 @@ class DeploymentFixer:
         """Add missing packages and resiliently fix syntax errors"""
         local = os.path.join(repo_dir, file_path)
         original_content = file_info.get('content', '') or '{}'
+
+        def _extract_npm_package_name(pkg_spec: str) -> str:
+            """Extract package name from npm spec, including scoped packages."""
+            spec = (pkg_spec or "").strip().strip("'\"")
+            if not spec:
+                return ""
+            # Scoped package with version, e.g. @scope/name@1.2.3
+            if spec.startswith('@'):
+                first_at = spec.find('@', 1)
+                return spec if first_at == -1 else spec[:first_at]
+            # Unscoped package with version, e.g. lodash@4.17.21
+            return spec.rsplit('@', 1)[0] if '@' in spec else spec
         
         # Resiliently parse JSON to handle "Extra data" or leading/trailing noise
         data = self._resilient_json_parse(original_content)
@@ -2386,6 +2746,27 @@ class DeploymentFixer:
         dev_deps = data.get('devDependencies', {})
         
         modified = False
+
+        # Remove local alias pseudo-packages that break npm install (e.g. @api/auth, @types).
+        removed_invalid = []
+        for pkg_name in list(deps.keys()):
+            if self._is_frontend_alias_package(pkg_name):
+                removed_invalid.append(pkg_name)
+                del deps[pkg_name]
+                modified = True
+        for pkg_name in list(dev_deps.keys()):
+            if self._is_frontend_alias_package(pkg_name):
+                removed_invalid.append(pkg_name)
+                del dev_deps[pkg_name]
+                modified = True
+        if removed_invalid:
+            for pkg_name in removed_invalid:
+                self._invalid_npm_packages.add(pkg_name)
+            self._safe_log(
+                job_id,
+                f"🧹 Removed invalid/local alias dependencies from package.json: {sorted(set(removed_invalid))}",
+                "Package Recovery"
+            )
         
         # BOOTSTRAPPING: If node_modules is missing, we must return True to trigger a refresh
         # even if package.json content hasn't changed.
@@ -2408,13 +2789,26 @@ class DeploymentFixer:
             'clsx': '^2.1.1',
             'tailwind-merge': '^2.5.2',
             '@types/react': '^18.2.0',
+            '@types/react-dom': '^18.2.0',
             '@types/node': '^20.11.0'
         }
         
+        npm_name_re = re.compile(r"^(?:@[a-z0-9._-]+\/)?[a-z0-9][a-z0-9._-]*$", re.IGNORECASE)
+
         for pkg in packages:
+            pkg = (pkg or "").strip()
+            if not pkg:
+                continue
+            if pkg == '@zustand/persist':
+                self._safe_log(job_id, "🔁 Normalizing '@zustand/persist' dependency to 'zustand'", "Package Normalize")
+                pkg = 'zustand'
             # Never add local aliases/paths as npm dependencies.
-            if pkg.startswith(('@/','./','../','~/', '/')) or ':' in pkg or '\\' in pkg:
+            if self._is_frontend_alias_package(pkg):
                 self._safe_log(job_id, f"⏭️ Skipping invalid/local alias dependency: {pkg}", "Package Filter")
+                self._invalid_npm_packages.add(pkg)
+                continue
+            if not npm_name_re.match(pkg):
+                self._safe_log(job_id, f"⏭️ Skipping invalid npm package token: {pkg}", "Package Filter")
                 self._invalid_npm_packages.add(pkg)
                 continue
             if pkg in self._invalid_npm_packages:
@@ -2482,9 +2876,11 @@ class DeploymentFixer:
             else:
                 self.job_manager.log(job_id, f"⚠️ Failed to regenerate lock file: {result.stderr[:200]}", "Lock File Warning", level="WARNING")
                 # Auto-recover from invalid/non-existent package versions causing ETARGET
-                etarget_match = re.search(r"No matching version found for ([^@\s]+)@([^\s.]+[^\s]*)", result.stderr)
+                etarget_match = re.search(r"No matching version found for ([^\s]+)", result.stderr)
                 if etarget_match:
-                    bad_pkg = etarget_match.group(1).strip()
+                    bad_pkg = _extract_npm_package_name(etarget_match.group(1))
+                    if not bad_pkg:
+                        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
                     self._invalid_npm_packages.add(bad_pkg)
                     removed = False
                     if bad_pkg in deps:
@@ -2505,7 +2901,9 @@ class DeploymentFixer:
                     e404_match = re.search(r"'([^']+@\S+)' is not in this registry", result.stderr)
                     if e404_match:
                         pkg_with_version = e404_match.group(1)
-                        bad_pkg = pkg_with_version.split('@')[0] if '@' in pkg_with_version else pkg_with_version
+                        bad_pkg = _extract_npm_package_name(pkg_with_version)
+                        if not bad_pkg:
+                            return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
                         self._invalid_npm_packages.add(bad_pkg)
                         removed = False
                         if bad_pkg in deps:
@@ -2632,6 +3030,104 @@ class DeploymentFixer:
             
             return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
         return False
+
+    async def _fix_python_syntax_artifacts(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Deterministically clean common AI formatting artifacts that break Python syntax."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+
+        # Prefer fenced python code when present.
+        fenced = re.search(r"```(?:python)?\n(.*?)\n```", content, flags=re.DOTALL | re.IGNORECASE)
+        if fenced:
+            content = fenced.group(1).strip() + "\n"
+        else:
+            cleaned_lines = []
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("FILE_PATH:"):
+                    continue
+                if stripped in ("---", "```", "python"):
+                    continue
+                cleaned_lines.append(line)
+            content = "\n".join(cleaned_lines).strip() + "\n"
+
+        # If syntax still fails at line 1, drop leading non-code lines progressively.
+        def _looks_like_python_start(s: str) -> bool:
+            return bool(re.match(r"^\s*(from|import|class|def|async\s+def|if __name__|@|#|\"\"\"|'''|$)", s))
+
+        for _ in range(20):
+            try:
+                compile(content, local, 'exec')
+                break
+            except SyntaxError as e:
+                lines = content.splitlines()
+                if not lines:
+                    return False
+                if e.lineno == 1 and not _looks_like_python_start(lines[0]):
+                    content = "\n".join(lines[1:]).lstrip("\n")
+                    continue
+                return False
+        else:
+            return False
+
+        if content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self._safe_log(job_id, f"🧹 Cleaned Python syntax artifacts in {file_path}", "Programmatic Fix")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_python_unterminated_triple_quote(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Close unterminated triple-quoted strings/f-strings in Python files."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+        candidates: List[str] = []
+
+        # First attempt: close dangling triple double-quote strings at EOF.
+        if content.count('"""') % 2 == 1:
+            candidates.append(content.rstrip() + '\n"""\n')
+
+        # Second attempt: close dangling triple single-quote strings at EOF.
+        if content.count("'''") % 2 == 1:
+            candidates.append(content.rstrip() + "\n'''\n")
+
+        # Fallback attempt: sanitize obvious AI marker lines, then close if still odd.
+        cleaned = "\n".join(
+            line for line in content.splitlines()
+            if line.strip() not in ("---", "```", "python") and not line.strip().startswith("FILE_PATH:")
+        )
+        if cleaned.count('"""') % 2 == 1:
+            candidates.append(cleaned.rstrip() + '\n"""\n')
+        if cleaned.count("'''") % 2 == 1:
+            candidates.append(cleaned.rstrip() + "\n'''\n")
+
+        for candidate in candidates:
+            try:
+                compile(candidate, local, 'exec')
+                if candidate != original:
+                    with open(local, 'w', encoding='utf-8') as f:
+                        f.write(candidate)
+                    self._safe_log(job_id, f"🧹 Closed unterminated triple-quoted string in {file_path}", "Programmatic Syntax Fix")
+                    return await self._commit_programmatic_fix(job_id, file_path, candidate, github_repo, github_branch)
+            except SyntaxError:
+                continue
+
+        return False
     
     async def _fix_type_file(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Add missing type exports"""
@@ -2680,6 +3176,42 @@ class DeploymentFixer:
 
         content = _fix_unterminated_block_comments(content)
 
+        # Remove orphaned standalone comment closers that trigger parse errors on "*/" lines.
+        def _remove_orphan_block_closers(ts_content: str) -> str:
+            depth = 0
+            out_lines = []
+            for line in ts_content.splitlines():
+                stripped = line.strip()
+                opens = line.count("/*")
+                closes = line.count("*/")
+                if stripped == "*/" and depth <= 0 and opens == 0:
+                    continue
+                depth += opens
+                if closes:
+                    depth = max(0, depth - closes)
+                out_lines.append(line)
+            return "\n".join(out_lines)
+
+        content = _remove_orphan_block_closers(content)
+
+        # Remove orphaned top-level closing braces that produce:
+        # "Declaration or statement expected" on a lone "}" line.
+        def _remove_orphan_closing_braces(ts_content: str) -> str:
+            depth = 0
+            out_lines = []
+            for line in ts_content.splitlines():
+                stripped = line.strip()
+                if stripped == "}" and depth <= 0:
+                    continue
+                opens = line.count("{")
+                closes = line.count("}")
+                depth += opens
+                depth = max(0, depth - closes)
+                out_lines.append(line)
+            return "\n".join(out_lines)
+
+        content = _remove_orphan_closing_braces(content)
+
         # Clean up invalid interfaces accidentally generated from error text in previous attempts.
         content = re.sub(
             r"\n?export interface (?:TypeScript error|ImportError|Missing dependency)[^\n]*\{\n\s*// TODO\n\}\n?",
@@ -2721,6 +3253,143 @@ class DeploymentFixer:
         with open(local, "w") as f:
             f.write(content)
         
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_ts_missing_exports(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Add deterministic missing TS exports (primarily functions/constants in API/service files)."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content') or ''
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+        missing_names: List[str] = []
+        for item in file_info.get('missing', []):
+            item_s = str(item)
+            m = re.search(r"Missing export:\s*([A-Za-z_][A-Za-z0-9_]*)", item_s)
+            if not m:
+                m = re.search(r"'([A-Za-z_][A-Za-z0-9_]*)'\s+not found in", item_s)
+            if m:
+                name = m.group(1).strip()
+                if name not in missing_names:
+                    missing_names.append(name)
+
+        if not missing_names:
+            return False
+
+        for name in missing_names:
+            if re.search(rf"\bexport\s+(?:async\s+)?(?:function|const|let|var|class|type|interface|enum)\s+{re.escape(name)}\b", content):
+                continue
+            if re.search(rf"\bexport\s*\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}", content):
+                continue
+            if not content.endswith('\n'):
+                content += '\n'
+            # Safe default export stub for API/service contracts.
+            content += (
+                f"\nexport const {name} = async (..._args: any[]): Promise<any> => {{\n"
+                f"  return null;\n"
+                f"}};\n"
+            )
+
+        if content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self._safe_log(job_id, f"✅ Added missing TS exports {missing_names} to {file_path}", "Programmatic Export Fix")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_python_parameter_order(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix Python function signatures where non-default params appear after default params."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+
+        def _split_params(params: str) -> List[str]:
+            parts: List[str] = []
+            cur = []
+            depth = 0
+            for ch in params:
+                if ch in "([{":
+                    depth += 1
+                elif ch in ")]}":
+                    depth = max(0, depth - 1)
+                if ch == ',' and depth == 0:
+                    parts.append(''.join(cur).strip())
+                    cur = []
+                else:
+                    cur.append(ch)
+            if cur:
+                parts.append(''.join(cur).strip())
+            return parts
+
+        def _normalize_signature(sig_text: str) -> str:
+            m = re.search(r"\((.*)\)", sig_text, flags=re.DOTALL)
+            if not m:
+                return sig_text
+            params_text = m.group(1)
+            params = _split_params(params_text)
+            seen_default = False
+            changed = False
+            fixed_params = []
+            for p in params:
+                stripped = p.strip()
+                if not stripped:
+                    continue
+                is_star = stripped.startswith('*')
+                has_default = ('=' in stripped)
+                if seen_default and not has_default and not is_star:
+                    stripped = f"{stripped} = None"
+                    changed = True
+                if has_default:
+                    seen_default = True
+                fixed_params.append(stripped)
+            if not changed:
+                return sig_text
+            new_params = ", ".join(fixed_params)
+            return sig_text[:m.start(1)] + new_params + sig_text[m.end(1):]
+
+        lines = content.splitlines()
+        changed_any = False
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if re.match(r"^\s*(async\s+def|def)\s+\w+\s*\(", line):
+                start = i
+                end = i
+                while end < len(lines) and "):" not in lines[end]:
+                    end += 1
+                if end < len(lines):
+                    block = "\n".join(lines[start:end + 1])
+                    new_block = _normalize_signature(block)
+                    if new_block != block:
+                        new_lines = new_block.splitlines()
+                        lines[start:end + 1] = new_lines
+                        i = start + len(new_lines) - 1
+                        changed_any = True
+            i += 1
+
+        if not changed_any:
+            return False
+
+        content = "\n".join(lines) + ("\n" if original.endswith("\n") else "")
+        try:
+            compile(content, local, 'exec')
+        except SyntaxError:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self._safe_log(job_id, f"🧹 Fixed Python parameter order in {file_path}", "Programmatic Syntax Fix")
         return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
     
     async def _fix_backend_prefix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
@@ -2964,13 +3633,15 @@ class DeploymentFixer:
 
     async def _create_missing_backend_module(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Create a missing backend module file reported by static analysis."""
+        backend_prefix = self._backend_prefix(repo_dir)
+        package_root = os.path.join(repo_dir, backend_prefix) if backend_prefix else repo_dir
         # If a same-named package directory exists, create/repair package __init__.py
         # instead of creating a shadowing top-level module file.
-        if file_path.startswith("backend/") and file_path.endswith(".py"):
+        if file_path.endswith(".py"):
             module_name = os.path.basename(file_path)[:-3]
-            package_dir = os.path.join(repo_dir, "backend", module_name)
+            package_dir = os.path.join(package_root, module_name)
             if os.path.isdir(package_dir):
-                init_path = f"backend/{module_name}/__init__.py"
+                init_path = self._apply_prefix(backend_prefix, f"{module_name}/__init__.py")
                 local_init = os.path.join(repo_dir, init_path)
                 if not os.path.exists(local_init):
                     os.makedirs(os.path.dirname(local_init), exist_ok=True)
@@ -3016,7 +3687,12 @@ class DeploymentFixer:
         """
         local = os.path.join(repo_dir, file_path)
         original_content = file_info.get('content', '')
-        is_model_file = '/models/' in file_path.replace("\\", "/")
+        normalized_file_path = file_path.replace("\\", "/")
+        is_model_file = (
+            '/models/' in normalized_file_path or
+            normalized_file_path.endswith('/models.py') or
+            normalized_file_path.endswith('models.py')
+        )
         if not original_content and os.path.exists(local):
             with open(local, 'r', encoding='utf-8') as f:
                 original_content = f.read()
@@ -3034,6 +3710,28 @@ class DeploymentFixer:
             return False
 
         content = original_content
+
+        # Recover from common AI formatting artifacts before adding exports.
+        try:
+            compile(content or "", local, 'exec')
+        except SyntaxError:
+            fenced = re.search(r"```(?:python)?\n(.*?)\n```", content, flags=re.DOTALL | re.IGNORECASE)
+            if fenced:
+                candidate = fenced.group(1).strip() + "\n"
+            else:
+                cleaned_lines = []
+                for line in (content or "").splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("FILE_PATH:") or stripped in ("---", "```", "python"):
+                        continue
+                    cleaned_lines.append(line)
+                candidate = "\n".join(cleaned_lines).strip() + "\n"
+            try:
+                compile(candidate, local, 'exec')
+                content = candidate
+                self._safe_log(job_id, f"🧹 Pre-cleaned syntax artifacts in {file_path} before adding exports", "Programmatic Export Fix")
+            except SyntaxError:
+                content = ""
 
         def _already_defined(name: str, src: str) -> bool:
             """Return True if name is already defined in src (def/class/assignment)."""

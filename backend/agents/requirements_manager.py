@@ -1,4 +1,5 @@
 from typing import Dict, Any, List, Optional
+import re
 from log_config import logger, error
 from agents.job_manager import job_store
 from agents.skill_registry import SkillRegistry
@@ -152,6 +153,27 @@ class RequirementsManager:
             parsed_subtasks = best_subtasks
             missing_coverage = best_missing_coverage
             job_store[job_id]["work_plan"] = work_plan
+
+        # Deterministic fallback: never abort solely because AI under-scoped the plan.
+        if len(parsed_subtasks) < min_subtasks or missing_coverage:
+            self.job_manager.log(
+                job_id,
+                "⚠️ AI work plan is still under-scoped after retries. Building deterministic fallback subtasks from PRD + selected skills.",
+                "Work Plan Fallback",
+                level="WARNING",
+            )
+            parsed_subtasks = self._build_fallback_subtasks(
+                clean_prd=clean_prd,
+                technical_config=technical_config,
+                min_subtasks=min_subtasks,
+                existing_subtasks=parsed_subtasks,
+            )
+            missing_coverage = self._detect_missing_skill_coverage(parsed_subtasks, technical_config)
+            self.job_manager.log(
+                job_id,
+                f"Fallback planner produced {len(parsed_subtasks)} subtasks; remaining missing coverage: {missing_coverage or 'none'}",
+                "Work Plan Fallback",
+            )
 
         # CRITICAL: Reject under-scoped plans to prevent incomplete code generation.
         if len(parsed_subtasks) < min_subtasks:
@@ -458,3 +480,104 @@ class RequirementsManager:
                 missing.append("cross-cutting quality")
 
         return missing
+
+    def _extract_prd_focus_areas(self, clean_prd: str, max_items: int = 6) -> List[str]:
+        """Extract implementation-focus phrases from PRD bullets/numbered lines."""
+        areas: List[str] = []
+        if not clean_prd:
+            return areas
+        lines = [ln.strip() for ln in clean_prd.splitlines() if ln.strip()]
+        for line in lines:
+            normalized = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+            if len(normalized) < 12:
+                continue
+            lowered = normalized.lower()
+            if any(marker in lowered for marker in ("requirement", "must", "should", "user can", "allow", "support", "feature", "flow")):
+                if normalized not in areas:
+                    areas.append(normalized)
+            if len(areas) >= max_items:
+                break
+        return areas
+
+    def _build_fallback_subtasks(
+        self,
+        clean_prd: str,
+        technical_config: Dict[str, Any],
+        min_subtasks: int,
+        existing_subtasks: List[Dict[str, str]],
+    ) -> List[Dict[str, str]]:
+        """Construct deterministic subtasks when AI work-plan generation is under-scoped."""
+        merged: List[Dict[str, str]] = []
+        seen = set()
+
+        def add(summary: str, description: str) -> None:
+            key = (summary.strip().lower(), description.strip().lower())
+            if not summary.strip() or not description.strip() or key in seen:
+                return
+            seen.add(key)
+            merged.append({"summary": summary.strip(), "description": description.strip()})
+
+        for st in (existing_subtasks or []):
+            add(st.get("summary", ""), st.get("description", ""))
+
+        has_backend = bool((technical_config or {}).get("backend"))
+        has_frontend = bool((technical_config or {}).get("frontend"))
+        has_full = bool((technical_config or {}).get("full"))
+        focus_areas = self._extract_prd_focus_areas(clean_prd)
+        focus_text = "; ".join(focus_areas[:3]) if focus_areas else "core user journeys and required product flows"
+
+        if has_backend:
+            add(
+                "Backend foundation and dependencies",
+                "Setup FastAPI backend project structure, configuration, environment variables, and required dependencies aligned to selected backend skill standards.",
+            )
+            add(
+                "Backend domain models and persistence",
+                f"Implement backend data models/schemas and persistence layer for: {focus_text}. Ensure validation and serialization are consistent.",
+            )
+            add(
+                "Backend services and business logic",
+                "Implement service layer, business rules, and reusable domain operations required by the PRD.",
+            )
+            add(
+                "Backend API routes and request contracts",
+                "Implement API endpoints, request/response contracts, and error handling for all required backend flows.",
+            )
+
+        if has_frontend:
+            add(
+                "Frontend foundation and configuration",
+                "Setup Next.js/TypeScript frontend configuration, build tooling, and shared project scaffolding aligned to selected frontend skill standards.",
+            )
+            add(
+                "Frontend shared types and API client integration",
+                "Implement shared frontend types and API client modules matching backend contracts.",
+            )
+            add(
+                "Frontend pages and reusable components",
+                f"Build pages/components for primary product journeys from PRD: {focus_text}.",
+            )
+
+        if has_backend and has_frontend:
+            add(
+                "Frontend-backend integration",
+                "Integrate frontend flows with backend endpoints, including loading/error states, data mapping, and contract validation.",
+            )
+
+        if has_full or (has_backend and has_frontend):
+            add(
+                "Quality gates and validation",
+                "Add static analysis checks, lint/type checks, and validation tasks to ensure generated code starts successfully without unresolved errors.",
+            )
+
+        # Ensure minimum count with PRD-driven implementation slices.
+        idx = 1
+        while len(merged) < min_subtasks:
+            feature = focus_areas[(idx - 1) % len(focus_areas)] if focus_areas else f"PRD feature set #{idx}"
+            add(
+                f"Implementation slice {idx}: {feature[:60]}",
+                f"Implement and validate this PRD requirement end-to-end: {feature}. Include code, integration, and verification updates.",
+            )
+            idx += 1
+
+        return merged

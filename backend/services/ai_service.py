@@ -449,6 +449,12 @@ Your task is to create a detailed technical work plan for implementing the follo
 REQUIREMENTS:
 {story_description}
 
+{self.REPO_STRUCTURE_INSTRUCTION}
+
+{self.SUBTASK_ORDERING_INSTRUCTION}
+
+{self.TOKEN_LIMIT_INSTRUCTION}
+
 CRITICAL PLANNING RULES:
 - The PRD section is the product source of truth. Decompose all required features into implementation subtasks.
 - The "Technical Requirements (Selected Skills)" section is mandatory engineering guidance.
@@ -489,82 +495,7 @@ Desc: [Detailed description]
     
     async def _generate_work_plan_gemini(self, prompt: str) -> str:
         """Generate work plan using Gemini API."""
-        # Restore full detailed prompt with all AI instructions
-        full_prompt = prompt + """
-        
-        🚨 CRITICAL REPOSITORY STRUCTURE - READ THIS FIRST! 🚨
-        
-        ==================================================================================
-        SEPARATE GIT REPOSITORIES - DO NOT USE "backend/" OR "frontend/" PREFIXES!
-        ==================================================================================
-        
-        ⚠️ FRONTEND and BACKEND are in SEPARATE git repositories!
-        ⚠️ DO NOT include "backend/" or "frontend/" prefixes in your file paths!
-        
-        ✅ CORRECT file paths examples (separate repos):
-           - Backend repo: models/user.py, auth/jwt_utils.py, services/auth_service.py, routes/auth_routes.py, main.py
-           - Frontend repo: src/types/user.ts, src/api/auth.ts, src/components/Login.tsx, app/page.tsx
-        
-        ❌ WRONG file paths (will cause FAILURE):
-           - backend/models/user.py ← WRONG! Backend is its own repo root
-           - frontend/src/types/user.ts ← WRONG! Frontend is its own repo root
-        
-        🎯 REMEMBER: Each repo is standalone - no "backend/" or "frontend/" folder prefixes!
-        
-        ==================================================================================
-        
-        Format your response with SUBTASK markers exactly like this:
-        
-        SUBTASK: 1. [Short summary title]
-        Desc: [Detailed description of what needs to be implemented]
-        ---
-        
-        SUBTASK: 2. [Next task title]
-        Desc: [Detailed description]
-        ---
-        
-        🚨 CRITICAL: TOKEN LIMIT - WITH 64K TOKENS - GROUP RELATED FUNCTIONALITY:
-        ⚠️ Each subtask should generate 5-10 files MAX to avoid truncation
-        ⚠️ Group related files together (e.g., model + service + routes)
-        
-        🚨 MANDATORY SUBTASK ORDERING - PREVENT ALL IMPORT ERRORS:
-        
-        Backend Python Projects - MANDATORY ORDER (NO "backend/" prefix):
-        1. "Setup Backend Dependencies" → requirements.txt, .env.example, __init__.py
-        2. "Create Data Models" → models/*.py (ALL model files)
-        3. "Setup Authentication Utilities" → auth/*.py (auth_utils.py, jwt_utils.py, dependencies.py)
-        4. "Setup Database Client" → database/*.py (firestore_client.py)
-        5. "Create Service Layer" → services/*.py (ALL service files)
-        6. "Create API Routes" → routes/*.py (ALL route files)
-        7. "Create Main Application" → main.py
-        8. "Add Tests" → tests/**/*.py
-        
-        Frontend TypeScript/React Projects - MANDATORY ORDER (NO "frontend/" prefix):
-        1. "Setup Frontend Configuration" → package.json, next.config.js, tsconfig.json, etc.
-        2. "Create Type Definitions" → src/types/*.ts (ALL type files)
-        3. "Create API Client Layer" → src/api/*.ts (ALL API functions)
-        4. "Create State Management" → src/store/*.ts
-        5. "Create Reusable Components" → src/components/**/*.tsx
-        6. "Create Page Components" → app/**/*.tsx
-        7. "Create Root Layout & Globals" → app/layout.tsx, page.tsx, globals.css
-        8. "Add Tests" → __tests__/**/*.test.tsx
-        
-        🚨 WHY THIS ORDER IS MANDATORY:
-        - Models MUST be created BEFORE services (services import models)
-        - Services MUST be created BEFORE routes (routes import services)
-        - Types MUST be created BEFORE API client (API client imports types)
-        - API client MUST be created BEFORE pages (pages import API functions)
-        
-        ⚠️ If a file imports from another file, BOTH files must be in SAME subtask OR created earlier
-        ⚠️ NEVER create a file that imports from a file that doesn't exist yet
-        
-        🎯 GOLDEN RULE FOR SUBTASK ORDER:
-        "Dependencies BEFORE Dependents. Always."
-        
-        🚨 CRITICAL OUTPUT REQUIREMENT:
-        - Produce at least 8 subtasks for full-stack requirements; at least 5 for single-stack requirements.
-        - Do not collapse the plan into a couple of broad subtasks.
-        """
+        full_prompt = prompt
         
         async def call_gemini():
             return await asyncio.to_thread(

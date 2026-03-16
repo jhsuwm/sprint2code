@@ -10,6 +10,22 @@ class DeploymentValidator:
     def __init__(self):
         pass
 
+    def _detect_frontend_root(self, repo_dir: str) -> str | None:
+        """Find frontend root directory (frontend/ subdir or repo root)."""
+        frontend_dir = os.path.join(repo_dir, 'frontend')
+        if os.path.exists(frontend_dir):
+            return frontend_dir
+        if os.path.exists(os.path.join(repo_dir, 'package.json')):
+            return repo_dir
+        if (
+            os.path.exists(os.path.join(repo_dir, 'app'))
+            or os.path.exists(os.path.join(repo_dir, 'pages'))
+            or os.path.exists(os.path.join(repo_dir, 'src', 'app'))
+            or os.path.exists(os.path.join(repo_dir, 'src', 'pages'))
+        ):
+            return repo_dir
+        return None
+
     def validate_all(self, repo_dir: str) -> List[str]:
         """Perform all validations on the repository - PRODUCTION CODE ONLY"""
         import_errors = self._validate_python_imports(repo_dir)
@@ -83,8 +99,8 @@ class DeploymentValidator:
         Uses type-flow analysis to catch property naming errors.
         """
         errors = []
-        frontend_dir = os.path.join(repo_dir, 'frontend')
-        if not os.path.exists(frontend_dir):
+        frontend_dir = self._detect_frontend_root(repo_dir)
+        if not frontend_dir:
             return []
 
         if not os.path.exists(os.path.join(frontend_dir, 'node_modules')):
@@ -208,8 +224,8 @@ class DeploymentValidator:
         import json
         logger.info("Starting Frontend dependency validation...")
         errors = []
-        frontend_dir = os.path.join(repo_dir, 'frontend')
-        if not os.path.exists(frontend_dir):
+        frontend_dir = self._detect_frontend_root(repo_dir)
+        if not frontend_dir:
             return []
         
         mandatory_files = {
@@ -266,6 +282,18 @@ class DeploymentValidator:
 
         package_import_pattern = r'import\s+.*\s+from\s+["\']([^./][^"\']+)["\']'
         internal_import_pattern = r'import\s+{(?P<members>[^}]+)}\s+from\s+["\'](?P<path>[^"\']+)["\']'
+        def _is_local_alias_import(spec: str) -> bool:
+            """True when an import spec is a project alias/path, not an npm package."""
+            s = (spec or "").strip()
+            if not s:
+                return False
+            if s.startswith(('@/','~/','#/','./','../','/')) or s in ('@', '~', '#'):
+                return True
+            # Orion projects commonly use these as TS path aliases.
+            if s == '@types' or s.startswith('@types/') or s.startswith('@api/'):
+                return True
+            return False
+
         node_builtin_modules = {
             'assert', 'buffer', 'child_process', 'cluster', 'console', 'constants', 'crypto',
             'dgram', 'dns', 'domain', 'events', 'fs', 'http', 'https', 'module', 'net',
@@ -275,6 +303,8 @@ class DeploymentValidator:
         function_sigs = {}
 
         for rel_path, full_path in file_map.items():
+            # Skip extension-less duplicate keys (added for import resolution only).
+            if not rel_path.endswith(('.ts', '.tsx', '.js', '.jsx')): continue
             if not os.path.isfile(full_path): continue
             try:
                 with open(full_path, 'r', encoding='utf-8') as f:
@@ -295,16 +325,25 @@ class DeploymentValidator:
             except Exception: continue
 
         for rel_path, full_path in file_map.items():
+            # Skip extension-less duplicate keys (added for import resolution only).
+            if not rel_path.endswith(('.ts', '.tsx', '.js', '.jsx')): continue
             if not os.path.isfile(full_path): continue
             try:
                 with open(full_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     matches = re.findall(package_import_pattern, content)
                     for pkg in matches:
+                        if _is_local_alias_import(pkg):
+                            continue
+                        # Ignore path aliases that are not npm packages (e.g. "~/", "~", "#/").
+                        if pkg.startswith(('~/', '#/')) or pkg in ('~', '#'):
+                            continue
                         package_name = f"{pkg.split('/')[0]}/{pkg.split('/')[1]}" if pkg.startswith('@') and len(pkg.split('/')) >= 2 else pkg.split('/')[0]
+                        if _is_local_alias_import(package_name):
+                            continue
                         if package_name in node_builtin_modules:
                             continue
-                        if package_name and not package_name.startswith(('node:', '.', '@/')):
+                        if package_name and not package_name.startswith(('node:', '.', '@/', '~/', '#/')) and package_name not in ('~', '#'):
                             if package_name not in all_dependencies:
                                 errors.append(f"Missing dependency: '{package_name}' is imported but not in package.json")
                     
@@ -341,8 +380,8 @@ class DeploymentValidator:
     def _validate_typescript_types(self, repo_dir: str) -> List[str]:
         """Run TypeScript compiler to check for type errors"""
         errors = []
-        frontend_dir = os.path.join(repo_dir, 'frontend')
-        if not os.path.exists(frontend_dir) or not os.path.exists(os.path.join(frontend_dir, 'tsconfig.json')):
+        frontend_dir = self._detect_frontend_root(repo_dir)
+        if not frontend_dir or not os.path.exists(os.path.join(frontend_dir, 'tsconfig.json')):
             return []
         
         node_modules_path = os.path.join(frontend_dir, 'node_modules')
@@ -392,10 +431,24 @@ class DeploymentValidator:
         errors = []
         logger.info("Starting Python import validation...")
         backend_dir = os.path.join(repo_dir, 'backend')
-        if not os.path.exists(backend_dir): return []
+        backend_root = None
+        if os.path.exists(backend_dir):
+            backend_root = backend_dir
+        else:
+            # Backend-only repos often keep Python sources at repo root.
+            # Detect by presence of any .py file outside common ignore dirs.
+            ignore_dirs = {'.git', 'node_modules', '.venv', 'venv', 'env', '.env', '__pycache__', 'site-packages', '.next'}
+            for root, dirs, files in os.walk(repo_dir):
+                dirs[:] = [d for d in dirs if d not in ignore_dirs]
+                if any(f.endswith('.py') for f in files):
+                    backend_root = repo_dir
+                    logger.info("Backend root fallback: using repo root for Python import validation")
+                    break
+        if backend_root is None:
+            return []
         
         installed_packages = set()
-        req_path = os.path.join(backend_dir, 'requirements.txt')
+        req_path = os.path.join(backend_root, 'requirements.txt')
         if not os.path.exists(req_path): req_path = os.path.join(repo_dir, 'requirements.txt')
         if os.path.exists(req_path):
             try:
@@ -503,11 +556,14 @@ class DeploymentValidator:
 
         module_to_file = {}
         ignore_dirs = {'venv', '.venv', 'env', '.env', 'node_modules', '.git', '__pycache__', 'site-packages'}
-        for root, dirs, files in os.walk(backend_dir):
+        ignore_dirs = {'venv', '.venv', 'env', '.env', 'node_modules', '.git', '__pycache__', 'site-packages'}
+        if backend_root == repo_dir:
+            ignore_dirs.add('frontend')
+        for root, dirs, files in os.walk(backend_root):
             dirs[:] = [d for d in dirs if d not in ignore_dirs]
             for file in files:
                 if file.endswith('.py'):
-                    rel_path = os.path.relpath(os.path.join(root, file), backend_dir)
+                    rel_path = os.path.relpath(os.path.join(root, file), backend_root)
                     module_name = ".".join(rel_path.split(os.path.sep))[:-3]
                     if module_name.endswith('.__init__'): module_name = module_name[:-9]
                     module_to_file[module_name] = os.path.join(root, file)

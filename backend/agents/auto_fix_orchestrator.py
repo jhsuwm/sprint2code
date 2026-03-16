@@ -182,6 +182,11 @@ class AutoFixOrchestrator:
 
             # Bound per-cycle workload to avoid very long cycles on large oscillating error sets.
             max_files_per_cycle = int(os.getenv('AUTO_FIX_MAX_FILES_PER_CYCLE', '12'))
+            total_errors = len(all_errors)
+            if total_errors >= 200:
+                max_files_per_cycle = max(max_files_per_cycle, 24)
+            elif total_errors >= 100:
+                max_files_per_cycle = max(max_files_per_cycle, 18)
             if max_files_per_cycle > 0 and len(prioritized_files) > max_files_per_cycle:
                 self.job_manager.log(
                     job_id,

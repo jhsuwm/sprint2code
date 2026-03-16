@@ -45,6 +45,29 @@ class CodeExecutionManager:
             elif isinstance(technical_config, str):
                 code_context += f"SKILL REQUIREMENTS:\n{technical_config}"
 
+            # Enforce repository-rooted paths for separate frontend/backend repos.
+            if task_type == "backend":
+                code_context += (
+                    "\n\nTARGET REPOSITORY RULES:\n"
+                    "- You are generating code for the BACKEND repository root.\n"
+                    "- FILE_PATH values MUST be repo-root relative (e.g., main.py, models/user.py).\n"
+                    "- NEVER prefix file paths with 'backend/'.\n"
+                )
+            elif task_type == "frontend":
+                code_context += (
+                    "\n\nTARGET REPOSITORY RULES:\n"
+                    "- You are generating code for the FRONTEND repository root.\n"
+                    "- FILE_PATH values MUST be repo-root relative (e.g., app/page.tsx, src/api/client.ts).\n"
+                    "- NEVER prefix file paths with 'frontend/'.\n"
+                )
+            else:
+                code_context += (
+                    "\n\nTARGET REPOSITORY RULES:\n"
+                    "- Frontend and backend are separate repositories.\n"
+                    "- Use repo-root file paths for the target repo only.\n"
+                    "- NEVER prefix FILE_PATH with 'backend/' or 'frontend/'.\n"
+                )
+
             self.job_manager.log(job_id, f"Processing {task_type} subtask {i+1}/{len(subtasks)}: {subtask_key}", f"Coding: {subtask_key}")
             
             # Log technical requirement source but NOT the whole content

@@ -6,6 +6,8 @@ import subprocess
 import asyncio
 import signal
 import socket
+from urllib.request import urlopen
+from urllib.error import URLError, HTTPError
 from typing import Dict, Any, Optional, List, Tuple
 from log_config import logger, error
 
@@ -19,6 +21,9 @@ class LocalAppService:
         self.last_startup_diagnostics: Dict[str, Any] = {}
         # Reserve Orion's own default ports so generated apps never collide.
         self._reserved_ports = {8000, 3000}
+        # Startup logs captured during service boot (stdout is drained by then, so preserve here)
+        self._backend_startup_logs: List[str] = []
+        self._frontend_startup_logs: List[str] = []
     
     def _resolve_service_dirs(self, repo_dir: str) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -87,6 +92,29 @@ class LocalAppService:
                 candidate = int(sock.getsockname()[1])
             if candidate not in reserved:
                 return candidate
+
+    async def _wait_for_http_ready(self, urls: List[str], timeout_seconds: int = 20) -> bool:
+        """Wait until any probe URL returns an HTTP response (2xx-5xx means process is serving)."""
+        async def _probe_once(url: str) -> bool:
+            def _sync_probe() -> bool:
+                try:
+                    with urlopen(url, timeout=1.5) as resp:
+                        return 200 <= getattr(resp, "status", 200) < 600
+                except HTTPError as e:
+                    return 200 <= e.code < 600
+                except URLError:
+                    return False
+                except Exception:
+                    return False
+            return await asyncio.to_thread(_sync_probe)
+
+        deadline = asyncio.get_event_loop().time() + timeout_seconds
+        while asyncio.get_event_loop().time() < deadline:
+            for url in urls:
+                if await _probe_once(url):
+                    return True
+            await asyncio.sleep(0.5)
+        return False
     
     async def start_app_locally(self, 
                                  repo_dir: str,
@@ -103,6 +131,8 @@ class LocalAppService:
         """
         logger.info(f"Starting app locally from {repo_dir}")
         self.last_startup_diagnostics = {}
+        self._backend_startup_logs = []
+        self._frontend_startup_logs = []
         
         try:
             backend_dir, frontend_dir = self._resolve_service_dirs(repo_dir)
@@ -217,7 +247,6 @@ class LocalAppService:
                 venv_python, '-m', 'uvicorn', 'main:app',
                 '--host', '0.0.0.0',
                 '--port', str(self.backend_port),
-                '--reload',
                 cwd=backend_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -253,13 +282,33 @@ class LocalAppService:
             except asyncio.TimeoutError:
                 pass  # No more output
             
-            # Check for obvious startup errors in stdout (uvicorn often logs to stderr; immediate crash handled above).
+            # Check for obvious startup errors in startup stream.
             for log_line in startup_logs:
                 if 'error' in log_line.lower() or 'traceback' in log_line.lower():
                     return False, f"Backend startup error: {log_line}"
+
+            # Process can stay alive while app is not importable in some launcher modes.
+            # Require an actual HTTP response before reporting success.
+            backend_ready = await self._wait_for_http_ready(
+                [
+                    f"http://127.0.0.1:{self.backend_port}/health",
+                    f"http://127.0.0.1:{self.backend_port}/",
+                ],
+                timeout_seconds=25,
+            )
+            if not backend_ready:
+                try:
+                    stderr_tail = await asyncio.wait_for(self.backend_process.stderr.read(), timeout=1.0)
+                except Exception:
+                    stderr_tail = b""
+                tail_msg = stderr_tail.decode(errors='replace').strip()
+                if tail_msg:
+                    return False, f"Backend did not become HTTP-ready. stderr: {tail_msg[:1200]}"
+                return False, "Backend did not become HTTP-ready in time"
             
             logger.info(f"Backend started successfully on port {self.backend_port}")
             logger.info(f"Backend startup logs: {startup_logs}")
+            self._backend_startup_logs = startup_logs
             return True, "Backend started"
         
         except Exception as e:
@@ -390,6 +439,7 @@ class LocalAppService:
             if ready:
                 logger.info(f"Frontend started successfully on port {self.frontend_port}")
                 logger.info(f"Frontend startup logs: {startup_logs[-5:]}")  # Last 5 lines
+                self._frontend_startup_logs = startup_logs
                 return True, "Frontend started"
             else:
                 try:
@@ -438,12 +488,14 @@ class LocalAppService:
     async def get_app_logs(self, service_type: str, limit: int = 100) -> List[str]:
         """
         Get logs from running app processes.
+        Falls back to startup logs captured during boot when the live buffer is empty
+        (frontend stdout is fully drained during the ready-signal wait loop).
         """
         process = self.backend_process if service_type == 'backend' else self.frontend_process
-        
+
         if not process:
             return [f"{service_type.title()} process not found"]
-            
+
         logs = []
         try:
             # Read available output from stdout and stderr
@@ -451,7 +503,7 @@ class LocalAppService:
                 stream = getattr(process, stream_name)
                 if not stream:
                     continue
-                    
+
                 while len(logs) < limit:
                     try:
                         # Use a very short timeout to drain existing buffer
@@ -464,7 +516,15 @@ class LocalAppService:
                         break
         except Exception as e:
             logs.append(f"Error reading logs: {str(e)}")
-        
+
+        # Fall back to startup logs if the live buffer was already drained during startup
+        if not logs:
+            startup_logs = (
+                self._backend_startup_logs if service_type == 'backend'
+                else self._frontend_startup_logs
+            )
+            logs = [f"[STARTUP] {line}" for line in startup_logs if line]
+
         return logs[-limit:]
 
     def get_startup_diagnostics(self) -> Dict[str, Any]:
@@ -482,13 +542,24 @@ class LocalAppService:
             Tuple of (backend_healthy, frontend_healthy)
         """
         backend_healthy = (
-            self.backend_process is not None and 
-            self.backend_process.returncode is None
+            self.backend_process is not None and
+            self.backend_process.returncode is None and
+            await self._wait_for_http_ready(
+                [
+                    f"http://127.0.0.1:{self.backend_port}/health",
+                    f"http://127.0.0.1:{self.backend_port}/",
+                ],
+                timeout_seconds=2,
+            )
         )
-        
+
         frontend_healthy = (
-            self.frontend_process is not None and 
-            self.frontend_process.returncode is None
+            self.frontend_process is not None and
+            self.frontend_process.returncode is None and
+            await self._wait_for_http_ready(
+                [f"http://127.0.0.1:{self.frontend_port}/"],
+                timeout_seconds=2,
+            )
         )
         
         return backend_healthy, frontend_healthy
