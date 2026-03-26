@@ -199,6 +199,50 @@ class AutoFixWorker:
                         except Exception:
                             pass
 
+                        # If target file still has errors BUT we also staged related files,
+                        # check whether the related files are causing the errors (poisoning).
+                        # Retry validation with ONLY the target file to isolate the problem.
+                        target_only_errors = file_specific_errors
+                        if file_specific_errors and staged_related:
+                            # Temporarily revert related files to baseline.
+                            for rel in staged_related:
+                                rel_state = snapshot.get(rel['file_path'])
+                                if rel_state and rel_state.get('exists') and rel_state.get('content') is not None:
+                                    with open(os.path.join(repo_dir, rel['file_path']), 'w', encoding='utf-8') as _f:
+                                        _f.write(rel_state['content'])
+                                elif rel_state and not rel_state.get('exists'):
+                                    try:
+                                        os.remove(os.path.join(repo_dir, rel['file_path']))
+                                    except FileNotFoundError:
+                                        pass
+                            target_only_all_errors = validator.validate_all(repo_dir)
+                            target_only_errors = [
+                                e for e in target_only_all_errors
+                                if self.fixer._error_mentions_file(e, file_path)
+                            ]
+                            if not target_only_errors:
+                                # Target file alone is clean — related files were poisoning.
+                                # Restore target file only and leave related files as snapshot.
+                                self._log(
+                                    job_id,
+                                    f"🔍 Worker {self.worker_id}: Related files caused TypeScript errors for {file_path} — committing target only.",
+                                    f"Worker {self.worker_id}",
+                                )
+                                # Re-apply just the target file locally (related files already reverted).
+                                with open(local_path, 'w', encoding='utf-8') as f:
+                                    f.write(fixed_content)
+                                # Use target_only stats for the commit decision.
+                                all_errors = target_only_all_errors
+                                staged_related = []  # Skip related file commits.
+                                stage_paths = [file_path]
+                            else:
+                                # Related files weren't the sole cause; restore them for the next attempt.
+                                for rel in staged_related:
+                                    rel_local = os.path.join(repo_dir, rel['file_path'])
+                                    with open(rel_local, 'w', encoding='utf-8') as _f:
+                                        _f.write(rel['content'])
+                            file_specific_errors = target_only_errors
+
                         # Keep lightweight observability cache only; not used to skip validation.
                         self._validation_cache[file_path] = (attempt, len(file_specific_errors) > 0)
 

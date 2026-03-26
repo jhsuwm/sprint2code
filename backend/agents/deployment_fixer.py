@@ -1811,10 +1811,37 @@ class DeploymentFixer:
                     files[dep_path]['missing'].append(f"Missing export: {missing_export}")
                     files[dep_path]['dependent_files'].append(importer_path)
 
+                # Check if it's a "not found in" export error (non-TS2305 formats).
+                not_found_match = re.search(r"'([^']+)'\s+not found in '([^']+)'", error)
+                if not_found_match:
+                    missing_export = not_found_match.group(1).strip()
+                    target_module = not_found_match.group(2).strip()
+                    dep_path = self._resolve_import_path(importer_path, target_module, repo_dir)
+                    dep_path = self._normalize_file_path(dep_path, repo_dir)
+                    if dep_path not in files:
+                        local = os.path.join(repo_dir, dep_path)
+                        content = _safe_read(local)
+                        files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
+                    files[dep_path]['missing'].append(f"Missing export: {missing_export}")
+                    files[dep_path]['dependent_files'].append(importer_path)
+                    continue
+
                 # Check if it's a "Cannot find module" error indicating missing package
                 module_match = re.search(r"(?:2307:\s*)?Cannot find module '([^']+)'", error)
                 if module_match:
                     missing_module = module_match.group(1)
+                    # NEW: Alias import mistakenly includes /src/ segment (e.g., "@/src/...")
+                    if missing_module.startswith("@/src/") or missing_module.startswith("~/src/"):
+                        src_file_path = self._normalize_file_path(importer_path, repo_dir)
+                        if src_file_path not in files:
+                            local = os.path.join(repo_dir, src_file_path)
+                            content = _safe_read(local)
+                            files[src_file_path] = {'missing': [], 'content': content}
+                        if missing_module.startswith("@/src/"):
+                            files[src_file_path]['missing'].append("Fix import alias: replace '@/src/' with '@/'")
+                        else:
+                            files[src_file_path]['missing'].append("Fix import alias: replace '~/src/' with '~/'")
+                        continue
                     # Local alias/path imports are not npm packages; treat them as missing local modules.
                     if self._is_frontend_alias_package(missing_module) or missing_module.startswith(('./', '../')):
                         dep_path = self._resolve_import_path(importer_path, missing_module, repo_dir)
@@ -2148,11 +2175,17 @@ class DeploymentFixer:
                 return _pick_existing_frontend_file(base)
 
             # Handle @/ alias (Next.js)
+            if target_norm.startswith("@/src/"):
+                alias_base = self._apply_prefix(frontend_prefix, target_norm[2:])
+                return _pick_existing_frontend_file(alias_base)
             if target_norm.startswith("@/"):
                 alias_base = self._apply_prefix(frontend_prefix, f"src/{target_norm[2:]}")
                 return _pick_existing_frontend_file(alias_base)
 
             # Handle ~/ alias often used as src root alias.
+            if target_norm.startswith("~/src/"):
+                alias_base = self._apply_prefix(frontend_prefix, target_norm[2:])
+                return _pick_existing_frontend_file(alias_base)
             if target_norm.startswith("~/"):
                 alias_base = self._apply_prefix(frontend_prefix, f"src/{target_norm[2:]}")
                 return _pick_existing_frontend_file(alias_base)
@@ -2224,6 +2257,9 @@ class DeploymentFixer:
             return True
         # Deterministic fix for missing TS exports in non-type files (e.g., src/api/*.ts).
         if file_path.endswith(('.ts', '.tsx')) and any(('Missing export:' in err) or ('not found in' in err) for err in missing_items):
+            return True
+        # Deterministic fix for alias imports that incorrectly include /src/ segment.
+        if file_path.endswith(('.ts', '.tsx', '.js', '.jsx')) and any('Fix import alias:' in err for err in missing_items):
             return True
         # Deterministic fix for auth page/component prop contract drift:
         # Type '{}' is missing required FormProps when rendering <LoginForm /> etc.
@@ -2302,6 +2338,8 @@ class DeploymentFixer:
                 return await self._fix_ts_with_jsx_syntax(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.ts', '.tsx')) and any((('Missing export:' in str(err)) or ('not found in' in str(err))) for err in file_info.get('missing', [])) and '/types/' not in file_path:
                 return await self._fix_ts_missing_exports(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.ts', '.tsx', '.js', '.jsx')) and any('Fix import alias:' in str(err) for err in file_info.get('missing', [])):
+                return await self._fix_frontend_alias_src_prefix(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.tsx', '.jsx')) and any(
                 ("Type '{}' is missing the following properties from type" in str(err) and "FormProps" in str(err))
                 for err in file_info.get('missing', [])
@@ -3296,14 +3334,43 @@ class DeploymentFixer:
 
         if content == original:
             return False
-
+        
         with open(local, 'w', encoding='utf-8') as f:
             f.write(content)
         self._safe_log(job_id, f"✅ Added missing TS exports {missing_names} to {file_path}", "Programmatic Export Fix")
         return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
 
+    async def _fix_frontend_alias_src_prefix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix alias imports like '@/src/...' or '~/src/...' to '@/...' or '~/...'."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content') or ''
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+
+        # Replace in import/require paths. Keep it simple and safe: only touch quoted paths.
+        content = re.sub(r"(['\"])@/src/", r"\1@/", content)
+        content = re.sub(r"(['\"])~/src/", r"\1~/", content)
+
+        if content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self._safe_log(job_id, f"✅ Fixed alias /src prefix in {file_path}", "Programmatic Import Fix")
+        return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     async def _fix_python_parameter_order(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
-        """Fix Python function signatures where non-default params appear after default params."""
+        """Fix Python function signatures where non-default params appear after default params.
+
+        Uses AST to precisely locate function signatures and depth-tracking to detect
+        real Python default values (ignoring = inside type annotation brackets like
+        Form(min_length=5) which falsely triggered the old '=' in stripped check).
+        """
         local = os.path.join(repo_dir, file_path)
         content = file_info.get('content', '')
         if not content and os.path.exists(local):
@@ -3314,14 +3381,47 @@ class DeploymentFixer:
 
         original = content
 
-        def _split_params(params: str) -> List[str]:
-            parts: List[str] = []
-            cur = []
+        def _has_real_default(param_str: str) -> bool:
+            """Return True if = appears at depth 0 (a real Python default, not a kwarg inside
+            a type annotation like Annotated[str, Form(min_length=5)])."""
             depth = 0
-            for ch in params:
-                if ch in "([{":
+            for ch in param_str:
+                if ch in '([{':
                     depth += 1
-                elif ch in ")]}":
+                elif ch in ')]}':
+                    depth = max(0, depth - 1)
+                elif ch == '=' and depth == 0:
+                    return True
+            return False
+
+        def _strip_inline_comments(text: str) -> str:
+            """Remove # inline comments from each line of a parameter block."""
+            result = []
+            for line in text.split('\n'):
+                # Strip inline comment but preserve string literals containing #
+                in_str = None
+                for i, ch in enumerate(line):
+                    if ch in ('"', "'") and in_str is None:
+                        in_str = ch
+                    elif ch == in_str:
+                        in_str = None
+                    elif ch == '#' and in_str is None:
+                        line = line[:i]
+                        break
+                result.append(line)
+            return '\n'.join(result)
+
+        def _split_params(params_str: str) -> List[str]:
+            """Split comma-separated params respecting bracket depth and ignoring inline comments."""
+            # Strip inline comments first so commas in comments (e.g. # e.g., x, y) don't split.
+            params_str = _strip_inline_comments(params_str)
+            parts: List[str] = []
+            cur: List[str] = []
+            depth = 0
+            for ch in params_str:
+                if ch in '([{':
+                    depth += 1
+                elif ch in ')]}':
                     depth = max(0, depth - 1)
                 if ch == ',' and depth == 0:
                     parts.append(''.join(cur).strip())
@@ -3330,58 +3430,139 @@ class DeploymentFixer:
                     cur.append(ch)
             if cur:
                 parts.append(''.join(cur).strip())
-            return parts
+            return [p for p in parts if p]
 
-        def _normalize_signature(sig_text: str) -> str:
-            m = re.search(r"\((.*)\)", sig_text, flags=re.DOTALL)
-            if not m:
-                return sig_text
-            params_text = m.group(1)
+        def _find_matching_close_paren(src: str, open_pos: int) -> int:
+            """Return index of the ) that closes the ( at open_pos."""
+            depth = 0
+            i = open_pos
+            while i < len(src):
+                if src[i] == '(':
+                    depth += 1
+                elif src[i] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        return i
+                i += 1
+            return -1
+
+        # Parse the AST to get reliable function def positions.
+        try:
+            import ast
+            tree = ast.parse(content)
+        except SyntaxError:
+            tree = None
+
+        lines_plain = content.splitlines()
+        func_sig_ranges: List[tuple] = []  # (start_line_0idx, end_line_0idx)
+
+        if tree:
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                func_start_0 = node.lineno - 1  # 0-indexed
+                # Compute character offset of the start of the def line.
+                char_offset = sum(len(l) + 1 for l in lines_plain[:func_start_0])
+                # Find the opening ( of the parameter list from that offset.
+                src_tail = content[char_offset:]
+                open_rel = src_tail.find('(')
+                if open_rel == -1:
+                    continue
+                open_abs = char_offset + open_rel
+                close_abs = _find_matching_close_paren(content, open_abs)
+                if close_abs == -1:
+                    continue
+                # Find the line number of close_abs.
+                cumulative = 0
+                close_line_0 = func_start_0
+                for idx in range(func_start_0, len(lines_plain)):
+                    cumulative += len(lines_plain[idx]) + 1  # +1 for \n
+                    if cumulative > close_abs - char_offset + open_rel:
+                        close_line_0 = idx
+                        break
+                    close_line_0 = idx
+                func_sig_ranges.append((func_start_0, close_line_0, open_abs, close_abs))
+        else:
+            # Fallback: scan for def/async def with a simple depth-tracking approach.
+            # Use (?m)^ so ^ anchors to start of each line, making this work for SyntaxError files.
+            for m in re.finditer(r'(?m)^[ \t]*(?:async\s+)?def\s+\w+\s*\(', content):
+                open_abs = m.end() - 1  # position of (
+                close_abs = _find_matching_close_paren(content, open_abs)
+                if close_abs == -1:
+                    continue
+                func_start_0 = content[:m.start()].count('\n')
+                close_line_0 = content[:close_abs].count('\n')
+                func_sig_ranges.append((func_start_0, close_line_0, open_abs, close_abs))
+
+        if not func_sig_ranges:
+            return False
+
+        # Work backwards to avoid line-number invalidation after edits.
+        changed_any = False
+        for func_start_0, sig_end_0, open_abs, close_abs in reversed(func_sig_ranges):
+            params_text = content[open_abs + 1:close_abs]
             params = _split_params(params_text)
-            seen_default = False
-            changed = False
-            fixed_params = []
+            if not params:
+                continue
+
+            # Separate into positional / star / keyword-only / double-star groups.
+            pre_star: List[str] = []
+            star_param: List[str] = []
+            post_star: List[str] = []
+            dstar_param: List[str] = []
+
             for p in params:
                 stripped = p.strip()
-                if not stripped:
-                    continue
-                is_star = stripped.startswith('*')
-                has_default = ('=' in stripped)
-                if seen_default and not has_default and not is_star:
-                    stripped = f"{stripped} = None"
-                    changed = True
-                if has_default:
-                    seen_default = True
-                fixed_params.append(stripped)
-            if not changed:
-                return sig_text
-            new_params = ", ".join(fixed_params)
-            return sig_text[:m.start(1)] + new_params + sig_text[m.end(1):]
+                if stripped.startswith('**'):
+                    dstar_param.append(p)
+                elif stripped.startswith('*'):
+                    star_param.append(p)
+                elif star_param:
+                    post_star.append(p)
+                else:
+                    pre_star.append(p)
 
-        lines = content.splitlines()
-        changed_any = False
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            if re.match(r"^\s*(async\s+def|def)\s+\w+\s*\(", line):
-                start = i
-                end = i
-                while end < len(lines) and "):" not in lines[end]:
-                    end += 1
-                if end < len(lines):
-                    block = "\n".join(lines[start:end + 1])
-                    new_block = _normalize_signature(block)
-                    if new_block != block:
-                        new_lines = new_block.splitlines()
-                        lines[start:end + 1] = new_lines
-                        i = start + len(new_lines) - 1
-                        changed_any = True
-            i += 1
+            # Check whether pre-star params have ordering violations.
+            needs_fix = False
+            seen_default = False
+            for p in pre_star:
+                if _has_real_default(p.strip()):
+                    seen_default = True
+                elif seen_default:
+                    needs_fix = True
+                    break
+
+            if not needs_fix:
+                continue
+
+            # Reorder: required params first, then those with defaults.
+            required = [p for p in pre_star if not _has_real_default(p.strip())]
+            optional = [p for p in pre_star if _has_real_default(p.strip())]
+            new_params = required + optional + star_param + post_star + dstar_param
+
+            # Reconstruct the parameter text preserving the original whitespace style.
+            if '\n' in params_text:
+                # Multi-line: detect indentation from first non-empty stripped line.
+                indent_str = '    '
+                for ln in params_text.split('\n')[1:]:
+                    stripped_ln = ln.lstrip()
+                    if stripped_ln:
+                        indent_str = ln[: len(ln) - len(stripped_ln)]
+                        break
+                new_params_text = (',\n' + indent_str).join(p.strip() for p in new_params)
+                new_params_text = '\n' + indent_str + new_params_text + ',\n'
+            else:
+                new_params_text = ', '.join(p.strip() for p in new_params)
+
+            # Splice the new params into the content string.
+            content = content[:open_abs + 1] + new_params_text + content[close_abs:]
+            # Recalculate lines_plain after each splice (needed for next backwards iteration).
+            lines_plain = content.splitlines()
+            changed_any = True
 
         if not changed_any:
             return False
 
-        content = "\n".join(lines) + ("\n" if original.endswith("\n") else "")
         try:
             compile(content, local, 'exec')
         except SyntaxError:
