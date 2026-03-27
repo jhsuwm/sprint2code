@@ -1,0 +1,58 @@
+# FastAPI and web framework dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+
+# Database dependencies
+
+# Google Cloud dependencies
+google-cloud-firestore==2.13.1
+google-cloud-storage==2.10.0
+google-cloud-secret-manager==2.16.4
+google-auth==2.23.4
+google-auth-oauthlib==1.1.0
+google-auth-httplib2==0.1.1
+
+# Authentication and security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+PyJWT==2.8.0
+
+# Environment and configuration
+python-dotenv==1.0.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+email-validator==2.1.0
+
+# HTTP requests for OAuth
+requests==2.31.0
+
+# Media processing dependencies
+Pillow==10.1.0
+python-magic==0.4.27
+
+# Utilities
+python-dateutil==2.8.2
+
+# Development and testing (optional)
+pytest==7.4.3
+pytest-asyncio==0.21.1
+httpx==0.25.2
+
+# Multi-Agent Vacation Planning Dependencies
+google-genai>=1.0.0,<2.0.0
+googlemaps>=4.10.0
+aiohttp>=3.9.0
+orjson>=3.9.0
+playwright>=1.40.0
+
+# Multi-vendor AI support with OpenAI-compatible API
+litellm>=1.0.0
+anthropic>=0.25.0
+
+# Logging and monitoring
+structlog==23.2.0
+
+# For Vercel deployment
+mangum==0.17.0
