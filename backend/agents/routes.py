@@ -18,7 +18,7 @@ from .constants import MAX_CHAT_HISTORY_CONTEXT
 # from .new_session_routes import router as new_session_router  # Auth dependency
 # from .flight_search_routes import router as flight_search_router
 # Import enhanced logging functions
-# Firestore not used in orion-dev-orchestrator
+# Firestore not used in sprint2code
 try:
     from ..log_config import info, error
     from ..utils.enhanced_logging import set_user_context
@@ -33,7 +33,7 @@ router = APIRouter()
 security = HTTPBearer()
 
 
-# Auth disabled - no authentication for orion-dev-orchestrator
+# Auth disabled - no authentication for sprint2code
 async def get_current_user_id() -> str:
     """
     Return default user ID (no authentication)

@@ -69,7 +69,7 @@ def verify_token(token: str) -> Dict[str, Any]:
     if token == "demo-token":
         return {
             "user_id": "demo-user",
-            "email": "demo@orion-dev-orchestrator.local",
+            "email": "demo@sprint2code.local",
             "has_restricted_access": True
         }
     

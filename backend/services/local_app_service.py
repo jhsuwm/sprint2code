@@ -19,7 +19,7 @@ class LocalAppService:
         self.backend_port = 8100
         self.frontend_port = 3100
         self.last_startup_diagnostics: Dict[str, Any] = {}
-        # Reserve Orion's own default ports so generated apps never collide.
+        # Reserve Sprint2Code's own default ports so generated apps never collide.
         self._reserved_ports = {8000, 3000}
         # Startup logs captured during service boot (stdout is drained by then, so preserve here)
         self._backend_startup_logs: List[str] = []
@@ -70,7 +70,7 @@ class LocalAppService:
     def _find_available_port(self, preferred_port: int, reserved_ports: Optional[set] = None) -> int:
         """
         Return an available port for servers that bind on 0.0.0.0.
-        Avoid reserved ports (e.g., Orion's own 8000/3000).
+        Avoid reserved ports (e.g., Sprint2Code's own 8000/3000).
         """
         reserved = reserved_ports or set()
         host = "0.0.0.0"

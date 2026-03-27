@@ -1,5 +1,5 @@
 """
-Agents package for the Orion Dev Orchestrator
+Agents package for the Sprint2Code
 """
 from .base_agent import BaseAgent
 from .user_intent_agent import UserIntentAgent

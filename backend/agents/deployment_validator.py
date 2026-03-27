@@ -289,7 +289,7 @@ class DeploymentValidator:
                 return False
             if s.startswith(('@/','~/','#/','./','../','/')) or s in ('@', '~', '#'):
                 return True
-            # Orion projects commonly use these as TS path aliases.
+            # Sprint2Code projects commonly use these as TS path aliases.
             if s == '@types' or s.startswith('@types/') or s.startswith('@api/'):
                 return True
             return False
@@ -406,6 +406,9 @@ class DeploymentValidator:
                             )
                             if m:
                                 file_path = m.group('file').strip()
+                                normalized = file_path.replace("\\", "/")
+                                if "/node_modules/" in normalized or normalized.startswith("node_modules/"):
+                                    continue
                                 position = f"{m.group('line')},{m.group('col')}"
                                 error_msg = f"{m.group('code')}: {m.group('msg').strip()}"
                                 errors.append(f"TypeScript error in '{file_path}' at {position}: {error_msg}")
@@ -413,6 +416,9 @@ class DeploymentValidator:
                                 # Fallback for unexpected tsc formats
                                 file_and_pos = line.split('):')[0]
                                 file_path = file_and_pos.rsplit('(', 1)[0]
+                                normalized = file_path.replace("\\", "/")
+                                if "/node_modules/" in normalized or normalized.startswith("node_modules/"):
+                                    continue
                                 position = file_and_pos.rsplit('(', 1)[1] if '(' in file_and_pos else 'unknown'
                                 error_msg = line.split('error TS', 1)[1] if 'error TS' in line else line
                                 errors.append(f"TypeScript error in '{file_path}' at {position}: {error_msg.strip()}")

@@ -1,4 +1,4 @@
-# Orion Dev Orchestrator - Setup Guide
+# Sprint2Code - Setup Guide
 
 ## Quick Setup (5 minutes)
 
@@ -12,14 +12,14 @@
 #### GitHub Personal Access Token
 1. Go to GitHub Settings → Developer Settings → Personal Access Tokens → Tokens (classic)
 2. Click "Generate new token (classic)"
-3. Give it a name (e.g., "Orion Dev Orchestrator")
+3. Give it a name (e.g., "Sprint2Code")
 4. Select scopes: `repo` (all), `workflow`
 5. Click "Generate token" and copy it
 
 #### JIRA API Token
 1. Go to [Atlassian API Tokens](https://id.atlassian.com/manage-profile/security/api-tokens)
 2. Click "Create API token"
-3. Give it a label (e.g., "Orion Dev")
+3. Give it a label (e.g., "Sprint2Code")
 4. Copy the token
 
 ### 2. Configure Environment

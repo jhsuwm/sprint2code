@@ -8,7 +8,7 @@ const inter = Inter({
 })
 
 export const metadata: Metadata = {
-  title: 'Orion Dev Orchestrator',
+  title: 'Sprint2Code',
   description: 'Autonomous AI-powered development agent',
 }
 

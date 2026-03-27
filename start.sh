@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Orion Dev Orchestrator - Main Startup Script
-# This script starts the Orion Dev Orchestrator dashboard and backend
+# Sprint2Code - Main Startup Script
+# This script starts the Sprint2Code dashboard and backend
 
 set -e
 
-echo "🚀 Starting Orion Dev Orchestrator"
+echo "🚀 Starting Sprint2Code"
 echo "=================================="
 echo ""
 
@@ -19,7 +19,7 @@ echo ""
 # Check if backend and frontend directories exist
 if [ ! -d "backend" ] || [ ! -d "frontend" ]; then
     echo "❌ Error: backend or frontend directory not found"
-    echo "   Make sure you're running this script from the orion-dev-orchestrator root directory"
+    echo "   Make sure you're running this script from the sprint2code root directory"
     exit 1
 fi
 
@@ -93,7 +93,7 @@ cd ..
 sleep 3
 
 echo ""
-echo "✅ Orion Dev Orchestrator started successfully!"
+echo "✅ Sprint2Code started successfully!"
 echo ""
 echo "📊 Access the application:"
 echo "   Dashboard:  http://localhost:3000"
@@ -110,12 +110,12 @@ echo "   kill $BACKEND_PID $FRONTEND_PID"
 echo ""
 
 # Save PIDs to file for easy cleanup
-cat > .orion-orchestrator-pids << EOF
+cat > .sprint2code-pids << EOF
 BACKEND_PID=$BACKEND_PID
 FRONTEND_PID=$FRONTEND_PID
 EOF
 
-echo "💡 Tip: Process IDs saved to .orion-orchestrator-pids"
+echo "💡 Tip: Process IDs saved to .sprint2code-pids"
 echo ""
 echo "🎯 Next steps:"
 echo "   1. Configure your JIRA and GitHub credentials in backend/.env"

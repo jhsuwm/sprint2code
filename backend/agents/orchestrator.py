@@ -14,7 +14,7 @@ from .models import (
 )
 from .user_intent_agent import UserIntentAgent
 
-# Firestore not used in orion-dev-orchestrator
+# Firestore not used in sprint2code
 # from database.firestore_repository import ChatRepository
 
 

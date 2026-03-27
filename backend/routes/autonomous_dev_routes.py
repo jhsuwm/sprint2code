@@ -27,7 +27,7 @@ async def get_user_from_header(authorization: str):
     # Always return demo user for standalone local app
     return {
         "user_id": "demo-user",
-        "email": "demo@orion-dev-orchestrator.local",
+        "email": "demo@sprint2code.local",
         "has_restricted_access": True
     }
 

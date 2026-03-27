@@ -1,9 +1,9 @@
-// Logo utility functions for Orion Dev Orchestrator
+// Logo utility functions for Sprint2Code
 
 export function getLogoPath(): string {
   return '/logo.png'; // Default logo path
 }
 
 export function getLogoAltText(): string {
-  return 'Orion Dev Orchestrator';
+  return 'Sprint2Code';
 }

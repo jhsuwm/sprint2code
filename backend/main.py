@@ -1,5 +1,5 @@
 """
-Main FastAPI application for the Orion Dev Orchestrator backend.
+Main FastAPI application for the Sprint2Code backend.
 This serves as the entry point for the API and handles routing.
 """
 
@@ -26,7 +26,7 @@ from routes.autonomous_dev_routes import router as autonomous_dev_router
 
 # Create FastAPI application
 app = FastAPI(
-    title="Orion Dev Orchestrator API",
+    title="Sprint2Code API",
     description="Backend API for autonomous AI-powered development agent",
     version="1.0.0",
     docs_url="/docs",
@@ -62,7 +62,7 @@ async def root():
     Root endpoint for health check.
     """
     return {
-        "message": "Orion Dev Orchestrator API is running",
+        "message": "Sprint2Code API is running",
         "version": "1.0.0",
         "status": "healthy"
     }
@@ -74,7 +74,7 @@ async def health_check():
     Returns healthy status for startup probe - simplified for reliability.
     """
     # Ultra-simple health check that should always work
-    return {"status": "healthy", "service": "orion-dev-orchestrator"}
+    return {"status": "healthy", "service": "sprint2code"}
 
 @app.get("/health/detailed")
 async def detailed_health_check():
@@ -88,7 +88,7 @@ async def detailed_health_check():
     response = {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "service": "orion-dev-orchestrator",
+        "service": "sprint2code",
         "version": "1.0.0",
         "environment": os.getenv("ENVIRONMENT", "development"),
         "port": os.getenv("PORT", "8000")

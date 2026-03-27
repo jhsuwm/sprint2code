@@ -197,7 +197,7 @@ export default function AutonomousDevDashboard() {
       {/* Header */}
       <header className="bg-slate-900 border-b border-slate-700 p-2 shadow-sm flex items-center justify-between relative shrink-0">
         <div className="flex items-center gap-3">
-          <h1 className="text-xl font-bold text-slate-200">🚀 Orion Dev Orchestrator</h1>
+          <h1 className="text-xl font-bold text-slate-200">🚀 Sprint2Code</h1>
           <button 
             onClick={() => fetchJiraStructure(true)}
             className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white px-4 py-1.5 rounded-full text-xs font-semibold transition-all duration-300 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 flex items-center"

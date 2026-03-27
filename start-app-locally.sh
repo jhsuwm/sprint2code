@@ -1,11 +1,11 @@
 #!/bin/bash
 
-# Orion Dev Orchestrator - Local App Startup Script
+# Sprint2Code - Local App Startup Script
 # This script helps you start AI-generated apps locally for testing
 
 set -e
 
-echo "🚀 Orion Dev Orchestrator - Local App Startup"
+echo "🚀 Sprint2Code - Local App Startup"
 echo "=============================================="
 echo ""
 
@@ -146,12 +146,12 @@ fi
 echo ""
 
 # Save PIDs to file for easy cleanup
-cat > .orion-pids << EOF
+cat > .sprint2code-pids << EOF
 BACKEND_PID=$BACKEND_PID
 FRONTEND_PID=$FRONTEND_PID
 EOF
 
-echo "💡 Tip: PIDs saved to .orion-pids for easy cleanup"
+echo "💡 Tip: PIDs saved to .sprint2code-pids for easy cleanup"
 echo ""
 
 # Wait for user interrupt

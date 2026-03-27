@@ -84,7 +84,7 @@ class DeploymentFixer:
             return False
         if p.startswith(('@/','./','../','~/', '#/', '/')) or p in ('@', '~', '#'):
             return True
-        # Orion alias scopes in generated apps.
+        # Sprint2Code alias scopes in generated apps.
         if p.startswith('@api/'):
             return True
         # npm/package manager protocol specs should never appear as package names here.
@@ -1469,6 +1469,28 @@ class DeploymentFixer:
                     f"Strip invalid pip line: '{invalid_pip_match.group(1)}'"
                 )
                 continue
+            # NEW: Invalid pip version (package pinned to a non-existent version)
+            version_mismatch = re.search(
+                r"Invalid pip version in 'requirements\.txt': '([^']+)' not available\.(?: Available versions: (.+))?",
+                error
+            )
+            if version_mismatch:
+                bad_req = version_mismatch.group(1).strip()
+                available = (version_mismatch.group(2) or "").strip()
+                file_path = self._apply_prefix(backend_prefix, "requirements.txt")
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content, 'packages': set()}
+                if available:
+                    files[file_path]['missing'].append(
+                        f"Invalid version: '{bad_req}' not available. Available versions: {available}"
+                    )
+                else:
+                    files[file_path]['missing'].append(
+                        f"Invalid version: '{bad_req}' not available."
+                    )
+                continue
             if "Runtime pip install failure in requirements.txt" in error:
                 file_path = self._apply_prefix(backend_prefix, "requirements.txt")
                 if file_path not in files:
@@ -2268,6 +2290,12 @@ class DeploymentFixer:
             for err in missing_items
         ):
             return True
+        # Deterministic fix for missing object properties in TS types
+        if file_path.endswith(('.ts', '.tsx')) and any(
+            ("does not exist in type" in err) or ("Property '" in err and "does not exist on type" in err)
+            for err in missing_items
+        ):
+            return True
         if '/types/' in file_path and file_path.endswith('.ts'):
             # For missing exports in shared type files, deterministic export stubs are safer than repeated AI loops.
             if any('Missing export:' in err or 'not found in' in err for err in missing_items):
@@ -2345,6 +2373,11 @@ class DeploymentFixer:
                 for err in file_info.get('missing', [])
             ):
                 return await self._fix_auth_page_missing_form_props(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.ts', '.tsx')) and any(
+                ("does not exist in type" in str(err)) or ("Property '" in str(err) and "does not exist on type" in str(err))
+                for err in file_info.get('missing', [])
+            ):
+                return await self._fix_ts_missing_type_property(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif '/types/' in file_path and file_path.endswith('.ts'):
                 return await self._fix_type_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for "from backend.X" errors
@@ -2532,8 +2565,86 @@ class DeploymentFixer:
             content = '\n'.join(cleaned_lines)
             self._safe_log(job_id, f"🧹 Stripped malformed separator lines from {file_path}", "Requirements Cleanup")
 
+        # Handle invalid pinned versions discovered during runtime pip install
+        missing_entries = [str(m) for m in file_info.get('missing', [])]
+
+        def _version_key(v: str):
+            parts = re.split(r'[^0-9]+', v)
+            nums = [int(p) for p in parts if p.isdigit()]
+            return nums or [0]
+
+        def _best_version(versions: List[str]) -> str:
+            versions = [v.strip() for v in versions if v and v.strip()]
+            if not versions:
+                return ""
+            return max(versions, key=_version_key)
+
+        def _extract_req_name(req: str) -> str:
+            base = re.split(r'[<>=!~]', req, maxsplit=1)[0].strip()
+            return base
+
+        def _apply_version_fix(req_name: str, new_version: str) -> bool:
+            nonlocal content
+            lines = content.splitlines()
+            updated = False
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                name_part = re.split(r'[<>=!~]', stripped, maxsplit=1)[0].strip()
+                base_name = name_part.split('[', 1)[0].strip()
+                if base_name.lower() == req_name.lower():
+                    # Preserve extras in name_part if present.
+                    if new_version:
+                        lines[i] = f"{name_part}=={new_version}"
+                    else:
+                        lines[i] = name_part
+                    updated = True
+            if not updated:
+                # Append if not present
+                if new_version:
+                    lines.append(f"{req_name}=={new_version}")
+                else:
+                    lines.append(req_name)
+                updated = True
+            content = "\n".join(lines)
+            return updated
+
+        version_fixed = False
+        for entry in missing_entries:
+            vm = re.search(
+                r"Invalid version: '([^']+)' not available(?:\. Available versions: (.+))?",
+                entry
+            )
+            if not vm:
+                continue
+            bad_req = vm.group(1).strip()
+            available_raw = (vm.group(2) or "").strip()
+            req_name = _extract_req_name(bad_req)
+            if available_raw:
+                versions = [v.strip() for v in available_raw.split(',')]
+                best = _best_version(versions)
+                if best:
+                    if _apply_version_fix(req_name, best):
+                        version_fixed = True
+                        self._safe_log(
+                            job_id,
+                            f"🧹 Downgraded {req_name} to available version {best}",
+                            "Requirements Cleanup"
+                        )
+            else:
+                # No version list available, unpin to allow pip to resolve
+                if _apply_version_fix(req_name, ""):
+                    version_fixed = True
+                    self._safe_log(
+                        job_id,
+                        f"🧹 Unpinned {req_name} to allow pip to resolve a valid version",
+                        "Requirements Cleanup"
+                    )
+
         if not packages and not content_was_dirty:
-            return False
+            if not version_fixed:
+                return False
         
         # EXPANDED: Map module names to actual PyPI packages
         pkg_map = {
@@ -3089,6 +3200,10 @@ class DeploymentFixer:
             cleaned_lines = []
             for line in content.splitlines():
                 stripped = line.strip()
+                if stripped.startswith(("ROOT_CAUSE:", "COMPLETE_FIX:", "VERIFICATION:", "OUTPUT FORMAT:", "SUCCESS =")):
+                    continue
+                if stripped.startswith(("###", "NOTE:", "IMPORTANT:", "INSTRUCTIONS:")):
+                    continue
                 if stripped.startswith("FILE_PATH:"):
                     continue
                 if stripped in ("---", "```", "python"):
@@ -3100,7 +3215,21 @@ class DeploymentFixer:
         def _looks_like_python_start(s: str) -> bool:
             return bool(re.match(r"^\s*(from|import|class|def|async\s+def|if __name__|@|#|\"\"\"|'''|$)", s))
 
-        for _ in range(20):
+        def _is_artifact_line(s: str) -> bool:
+            s = s.strip()
+            if not s:
+                return True
+            if s.startswith(("ROOT_CAUSE:", "COMPLETE_FIX:", "VERIFICATION:", "OUTPUT FORMAT:", "SUCCESS =")):
+                return True
+            if s.startswith(("###", "NOTE:", "IMPORTANT:", "INSTRUCTIONS:")):
+                return True
+            if s.startswith("FILE_PATH:"):
+                return True
+            if s in ("---", "```", "python"):
+                return True
+            return False
+
+        for _ in range(40):
             try:
                 compile(content, local, 'exec')
                 break
@@ -3108,6 +3237,11 @@ class DeploymentFixer:
                 lines = content.splitlines()
                 if not lines:
                     return False
+                idx = max(0, (e.lineno or 1) - 1)
+                if idx < len(lines) and _is_artifact_line(lines[idx]):
+                    del lines[idx]
+                    content = "\n".join(lines).lstrip("\n")
+                    continue
                 if e.lineno == 1 and not _looks_like_python_start(lines[0]):
                     content = "\n".join(lines[1:]).lstrip("\n")
                     continue
@@ -3278,6 +3412,23 @@ class DeploymentFixer:
             if candidate and candidate not in valid_missing_exports:
                 valid_missing_exports.append(candidate)
 
+        # Fix isolatedModules export type errors by converting value exports to type exports.
+        if any("isolatedModules" in str(item) and "export type" in str(item) for item in missing):
+            # Build a set of declared type-like names in this file.
+            declared = set()
+            for match in re.finditer(r"\b(type|interface|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\b", content):
+                declared.add(match.group(2))
+
+            def _convert_export_type(match: re.Match) -> str:
+                names = [n.strip() for n in match.group(1).split(',') if n.strip()]
+                if not names:
+                    return match.group(0)
+                if any(name in declared for name in names):
+                    return f"export type {{ {', '.join(names)} }};"
+                return match.group(0)
+
+            content = re.sub(r"export\s*\{\s*([^}]+)\s*\}\s*;", _convert_export_type, content)
+
         if valid_missing_exports:
             if len(content.strip()) < 20:
                 content = "// Auto-generated\n\n"
@@ -3305,18 +3456,37 @@ class DeploymentFixer:
 
         original = content
         missing_names: List[str] = []
+        has_invalid_missing = False
+        has_inline_comment_token = False
         for item in file_info.get('missing', []):
             item_s = str(item)
+            if re.search(r"'[^']*//[^']*'\s+not found in", item_s):
+                has_inline_comment_token = True
             m = re.search(r"Missing export:\s*([A-Za-z_][A-Za-z0-9_]*)", item_s)
             if not m:
                 m = re.search(r"'([A-Za-z_][A-Za-z0-9_]*)'\s+not found in", item_s)
+                if not m and "not found in" in item_s:
+                    # Likely an inline comment or invalid token in an import/export line.
+                    has_invalid_missing = True
             if m:
                 name = m.group(1).strip()
                 if name not in missing_names:
                     missing_names.append(name)
 
-        if not missing_names:
-            return False
+        if has_inline_comment_token or (not missing_names and has_invalid_missing):
+            # Strip inline comments on import/export lines (common source of bogus tokens).
+            content = re.sub(
+                r"(?m)^(\s*(?:import|export)[^\n]*?)\s*//.*$",
+                r"\1",
+                content
+            )
+            if content != original:
+                with open(local, 'w', encoding='utf-8') as f:
+                    f.write(content)
+                self._safe_log(job_id, f"🧹 Removed inline import/export comments in {file_path}", "Programmatic Fix")
+                return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+            if not missing_names:
+                return False
 
         for name in missing_names:
             if re.search(rf"\bexport\s+(?:async\s+)?(?:function|const|let|var|class|type|interface|enum)\s+{re.escape(name)}\b", content):
@@ -3339,6 +3509,93 @@ class DeploymentFixer:
             f.write(content)
         self._safe_log(job_id, f"✅ Added missing TS exports {missing_names} to {file_path}", "Programmatic Export Fix")
         return await self._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_ts_missing_type_property(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Add missing properties to TS types/interfaces referenced by errors."""
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        if not missing_items:
+            return False
+
+        prop_name = None
+        type_name = None
+        for item in missing_items:
+            m = re.search(r"Object literal may only specify known properties, and '([^']+)' does not exist in type '([^']+)'", item)
+            if m:
+                prop_name, type_name = m.group(1), m.group(2)
+                break
+            m = re.search(r"Property '([^']+)' does not exist on type '([^']+)'", item)
+            if m:
+                prop_name, type_name = m.group(1), m.group(2)
+                break
+        if not prop_name or not type_name:
+            return False
+
+        def _guess_type(prop: str) -> str:
+            prop_l = prop.lower()
+            if prop_l.startswith(("is_", "has_", "can_", "should_")) or prop_l in ("active", "enabled", "disabled", "verified"):
+                return "boolean"
+            if prop_l in ("count", "total", "size", "age"):
+                return "number"
+            return "string"
+
+        prop_type = _guess_type(prop_name)
+        prefixes = self._repo_prefixes(repo_dir)
+        frontend_prefix = prefixes["frontend"]
+        base_dir = os.path.join(repo_dir, frontend_prefix, "src", "types") if frontend_prefix else os.path.join(repo_dir, "src", "types")
+        candidates: List[str] = []
+        if os.path.isdir(base_dir):
+            for root, _, files in os.walk(base_dir):
+                for f in files:
+                    if f.endswith(".ts"):
+                        candidates.append(os.path.join(root, f))
+        else:
+            for rel in ("src/types/auth.ts", "src/types/index.ts", "src/types/api.ts"):
+                local = os.path.join(repo_dir, frontend_prefix, rel) if frontend_prefix else os.path.join(repo_dir, rel)
+                if os.path.exists(local):
+                    candidates.append(local)
+
+        def _patch_type_file(path: str) -> str:
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    ts = f.read()
+            except Exception:
+                return ""
+
+            original = ts
+            interface_pat = re.compile(rf"(interface\s+{re.escape(type_name)}\s*\{{)([^}}]*)(\}})", re.DOTALL)
+            type_pat = re.compile(rf"(type\s+{re.escape(type_name)}\s*=\s*\{{)([^}}]*)(\}})", re.DOTALL)
+
+            def _insert(body: str) -> str:
+                if re.search(rf"\b{re.escape(prop_name)}\s*:", body):
+                    return body
+                line = f"  {prop_name}: {prop_type};"
+                body = body.rstrip()
+                if body and not body.endswith("\n"):
+                    body += "\n"
+                body += line + "\n"
+                return body
+
+            if interface_pat.search(ts):
+                ts = interface_pat.sub(lambda m: f"{m.group(1)}{_insert(m.group(2))}{m.group(3)}", ts)
+            elif type_pat.search(ts):
+                ts = type_pat.sub(lambda m: f"{m.group(1)}{_insert(m.group(2))}{m.group(3)}", ts)
+            else:
+                return ""
+
+            if ts == original:
+                return ""
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(ts)
+            return ts
+
+        for candidate in candidates:
+            updated = _patch_type_file(candidate)
+            if updated:
+                rel_path = os.path.relpath(candidate, repo_dir).replace("\\", "/")
+                self._safe_log(job_id, f"🧹 Added '{prop_name}' to {type_name} in {rel_path}", "Programmatic Fix")
+                return await self._commit_programmatic_fix(job_id, rel_path, updated, github_repo, github_branch)
+
+        return False
 
     async def _fix_frontend_alias_src_prefix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Fix alias imports like '@/src/...' or '~/src/...' to '@/...' or '~/...'."""
@@ -3766,35 +4023,35 @@ class DeploymentFixer:
         changed = False
 
         if re.search(r"<LoginForm\s*/>", content):
-            if "const _orionNoopLoginSubmit" not in content:
+            if "const _sprint2codeNoopLoginSubmit" not in content:
                 insert_at = content.find("return ")
                 if insert_at != -1:
                     helper = (
-                        "const _orionNoopLoginSubmit = async (_payload: unknown) => {\n"
+                        "const _sprint2codeNoopLoginSubmit = async (_payload: unknown) => {\n"
                         "  return;\n"
                         "};\n\n"
                     )
                     content = content[:insert_at] + helper + content[insert_at:]
             content = re.sub(
                 r"<LoginForm\s*/>",
-                "<LoginForm onSubmit={_orionNoopLoginSubmit} isLoading={false} error={null} />",
+                "<LoginForm onSubmit={_sprint2codeNoopLoginSubmit} isLoading={false} error={null} />",
                 content
             )
             changed = True
 
         if re.search(r"<ForgotPasswordForm\s*/>", content):
-            if "const _orionNoopForgotSubmit" not in content:
+            if "const _sprint2codeNoopForgotSubmit" not in content:
                 insert_at = content.find("return ")
                 if insert_at != -1:
                     helper = (
-                        "const _orionNoopForgotSubmit = async (_payload: unknown) => {\n"
+                        "const _sprint2codeNoopForgotSubmit = async (_payload: unknown) => {\n"
                         "  return;\n"
                         "};\n\n"
                     )
                     content = content[:insert_at] + helper + content[insert_at:]
             content = re.sub(
                 r"<ForgotPasswordForm\s*/>",
-                "<ForgotPasswordForm onSubmit={_orionNoopForgotSubmit} isLoading={false} error={null} successMessage={null} />",
+                "<ForgotPasswordForm onSubmit={_sprint2codeNoopForgotSubmit} isLoading={false} error={null} successMessage={null} />",
                 content
             )
             changed = True

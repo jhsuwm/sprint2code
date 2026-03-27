@@ -1,4 +1,4 @@
-# Orion Dev Orchestrator 🚀
+# Sprint2Code 🚀
 
 An open-source autonomous development agent that transforms product ideas into working code through AI-powered code generation, static analysis, and intelligent auto-fixing.
 
@@ -248,10 +248,10 @@ npm run dev
 
 ### Stopping Services
 
-If using the script, press `Ctrl+C` or use the PIDs saved in `.orion-pids`:
+If using the script, press `Ctrl+C` or use the PIDs saved in `.sprint2code-pids`:
 ```bash
-kill $(cat .orion-pids | grep BACKEND_PID | cut -d= -f2)
-kill $(cat .orion-pids | grep FRONTEND_PID | cut -d= -f2)
+kill $(cat .sprint2code-pids | grep BACKEND_PID | cut -d= -f2)
+kill $(cat .sprint2code-pids | grep FRONTEND_PID | cut -d= -f2)
 ```
 
 ## 📚 Documentation
@@ -289,4 +289,4 @@ For questions and support, please open an issue on GitHub.
 
 ---
 
-**Made with ❤️ by the Orion Dev Team**
+**Made with ❤️ by the Sprint2Code Team**

@@ -1053,6 +1053,33 @@ class DeploymentManager:
                 f"remove this line (it is a code-block marker, not a package)"
             )
 
+        # pip version not found failures: "Could not find a version that satisfies the requirement X==Y (from versions: ...)"
+        version_mismatch = re.search(
+            r"Could not find a version that satisfies the requirement\s+([^\s]+)\s+\(from versions:\s*([^)]+)\)",
+            combined
+        )
+        if version_mismatch:
+            bad_req = version_mismatch.group(1).strip()
+            available = version_mismatch.group(2).strip()
+            errors.append(
+                "Invalid pip version in 'requirements.txt': "
+                f"'{bad_req}' not available. Available versions: {available}"
+            )
+
+        # Some pip outputs include a follow-up: "No matching distribution found for X==Y"
+        no_match = re.search(
+            r"No matching distribution found for\s+([^\s]+)",
+            combined
+        )
+        if no_match:
+            bad_req = no_match.group(1).strip()
+            # Avoid duplicate entries if we already captured version list above.
+            if not any(bad_req in e for e in errors):
+                errors.append(
+                    "Invalid pip version in 'requirements.txt': "
+                    f"'{bad_req}' not available."
+                )
+
         # Frontend runtime build errors can still be fixed by TS pipeline.
         missing_resolve = re.search(r"Module not found:.*Can't resolve ['\"]([^'\"]+)['\"]", combined, re.IGNORECASE)
         if missing_resolve:

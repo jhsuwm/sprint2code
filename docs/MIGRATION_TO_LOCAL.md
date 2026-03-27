@@ -78,13 +78,13 @@ To verify the migration is successful:
 
 1. **Start the backend**:
    ```bash
-   cd orion-dev-orchestrator/backend
+   cd sprint2code/backend
    uvicorn main:app --reload
    ```
 
 2. **Start the frontend**:
    ```bash
-   cd orion-dev-orchestrator/frontend
+   cd sprint2code/frontend
    npm run dev
    ```
 
