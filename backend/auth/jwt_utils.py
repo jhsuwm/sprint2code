@@ -13,14 +13,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 # JWT Configuration
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 # Set to 24 hours (1440 minutes) to support long-running operations like autonomous dev agent
 # which can take hours to complete code generation, deployment, and testing
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "1440"))
 
 # Static JWT token for Next.js middleware authentication
-STATIC_JWT_TOKEN = os.getenv("STATIC_JWT_TOKEN", "static-middleware-token-change-in-production")
+STATIC_JWT_TOKEN = os.getenv("STATIC_JWT_TOKEN")
+
+if not JWT_SECRET_KEY:
+    raise RuntimeError("JWT_SECRET_KEY environment variable must be set and must not contain a hardcoded default.")
 
 def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
     """
