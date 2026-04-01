@@ -5,7 +5,7 @@ An open-source autonomous development agent that transforms product ideas into w
 ## 🌟 Features
 
 - **💬 Natural Language to Code**: Describe your product idea in plain English, and watch it transform into production-ready code
-- **🤖 AI-Powered Development**: Integrates with Gemini AI to generate complete full-stack applications
+- **🤖 AI-Powered Development**: Supports Gemini AI, Anthropic, OpenAI, and OpenRouter for code generation
 - **🔄 GitHub Integration**: Automatically creates branches, commits code, and opens pull requests
 - **📋 JIRA Integration**: Creates comprehensive PRDs and manages development workflow with subtasks
 - **🔍 Static Analysis**: Validates TypeScript types, Python imports, and dependency integrity before deployment
@@ -20,7 +20,7 @@ An open-source autonomous development agent that transforms product ideas into w
 - **Requirements Manager**: Analyzes JIRA stories and manages GitHub repositories
 - **Code Execution Manager**: Generates code for each subtask using AI
 - **Deployment Manager**: Handles static analysis, auto-fix, and validation
-- **Service Integrations**: Gemini AI, GitHub, JIRA, Google Cloud
+- **Service Integrations**: Gemini AI, Anthropic, OpenAI, OpenRouter, GitHub, JIRA
 
 ### Frontend (Next.js/React)
 - **Dashboard**: Real-time view of agent execution logs and app health
@@ -35,7 +35,7 @@ An open-source autonomous development agent that transforms product ideas into w
 - Node.js 18+
 - GitHub account with Personal Access Token
 - JIRA account with API access
-- Google Gemini AI API key
+- AI vendor API key for Gemini, Anthropic, OpenAI, or OpenRouter
 
 ### Quick Start (Recommended)
 
@@ -79,7 +79,8 @@ cp .env.example .env
 ```
 
 Required environment variables in `.env`:
-- `GEMINI_API_KEY` - Your Google Gemini AI API key ([Get one here](https://makersuite.google.com/app/apikey))
+- `AI_VENDOR` - Select your AI vendor: `gemini`, `anthropic`, `openai`, or `openrouter`
+- `GEMINI_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `OPENROUTER_API_KEY` - Your chosen AI vendor API key
 - `GITHUB_TOKEN` - GitHub Personal Access Token with repo permissions
 - `JIRA_URL` - Your JIRA instance URL (e.g., https://yourcompany.atlassian.net)
 - `JIRA_EMAIL` - Your JIRA account email
