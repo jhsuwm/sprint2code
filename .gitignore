@@ -263,6 +263,7 @@ yarn-error.log*
 *.sqlite3
 
 # Secret/credential files
+*.env
 *secret*.json
 *credentials*.json
 service-account*.json
