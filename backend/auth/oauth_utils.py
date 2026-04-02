@@ -8,9 +8,7 @@ import requests
 import jwt
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
-import logging
-
-logger = logging.getLogger(__name__)
+from log_config import info, debug, error, warning, critical
 
 # OAuth Configuration
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
@@ -76,7 +74,7 @@ class GoogleOAuth(OAuthProvider):
             return token_info
             
         except requests.RequestException as e:
-            logger.error(f"Google OAuth verification error: {e}")
+            error(f"Google OAuth verification error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Could not verify Google OAuth token"
@@ -120,7 +118,7 @@ class GoogleOAuth(OAuthProvider):
             }
             
         except requests.RequestException as e:
-            logger.error(f"Google user info error: {e}")
+            error(f"Google user info error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Could not get Google user information"
@@ -188,13 +186,13 @@ class AppleOAuth(OAuthProvider):
             return payload
             
         except jwt.InvalidTokenError as e:
-            logger.error(f"Apple OAuth token error: {e}")
+            error(f"Apple OAuth token error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid Apple OAuth token"
             )
         except requests.RequestException as e:
-            logger.error(f"Apple OAuth verification error: {e}")
+            error(f"Apple OAuth verification error: {e}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Could not verify Apple OAuth token"

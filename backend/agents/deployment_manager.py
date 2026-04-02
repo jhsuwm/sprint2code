@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from log_config import logger, error
 from agents.job_manager import job_store
-from database.firestore_config import get_firestore_client
 from agents.deployment_validator import DeploymentValidator
 from agents.deployment_fixer import DeploymentFixer
 from agents.auto_fix_orchestrator import AutoFixOrchestrator
@@ -1121,9 +1120,5 @@ class DeploymentManager:
         return errors
 
     def _fetch_config_from_firestore(self, name: str) -> Optional[str]:
-        try:
-            db = get_firestore_client()
-            if not db: return None
-            doc = db.collection("autonomous_dev_configs").document(name).get()
-            return doc.to_dict().get("content") if doc.exists else None
-        except Exception: return None
+        # Firestore removed - no longer needed for local OSS usage
+        return None

@@ -8,9 +8,7 @@ import jwt
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 from fastapi import HTTPException, status
-import logging
-
-logger = logging.getLogger(__name__)
+from log_config import info, debug, error, warning, critical
 
 # JWT Configuration
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
@@ -49,7 +47,7 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
         encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
         return encoded_jwt
     except Exception as e:
-        logger.error(f"Error creating JWT token: {e}")
+        error(f"Error creating JWT token: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not create access token"
@@ -173,7 +171,7 @@ def get_user_from_token_with_refresh(token: str) -> Dict[str, Any]:
                         "token_refreshed": True
                     }
                 except Exception as e:
-                    logger.warning(f"Failed to proactively refresh token: {e}")
+                    warning(f"Failed to proactively refresh token: {e}")
         
         return {
             "user_id": user_id,
@@ -198,7 +196,7 @@ def get_user_from_token_with_refresh(token: str) -> Dict[str, Any]:
                     "token_refreshed": True
                 }
             except Exception as refresh_error:
-                logger.error(f"Failed to refresh expired token: {refresh_error}")
+                error(f"Failed to refresh expired token: {refresh_error}")
                 # Re-raise the original exception if refresh fails
                 raise e
         else:
@@ -281,7 +279,7 @@ def refresh_token(current_token: str) -> str:
             )
             
         except Exception as e:
-            logger.error(f"Error refreshing token: {e}")
+            error(f"Error refreshing token: {e}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Could not refresh token"

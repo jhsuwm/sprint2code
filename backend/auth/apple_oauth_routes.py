@@ -4,15 +4,13 @@ This module provides endpoints for initiating Apple OAuth flow and handling call
 """
 
 import os
-import logging
 import jwt
 import time
 from typing import Optional
 from fastapi import APIRouter, HTTPException, status, Query
 from pydantic import BaseModel
 import requests
-
-logger = logging.getLogger(__name__)
+from log_config import info, debug, error, warning, critical
 
 # Create router
 router = APIRouter()
@@ -73,7 +71,7 @@ async def apple_authorize(
         dict: Authorization URL for redirect
     """
     try:
-        logger.info(f"Initiating Apple OAuth flow for email: {email}, redirect: {redirect}")
+        info(f"Initiating Apple OAuth flow for email: {email}, redirect: {redirect}")
         
         if not APPLE_CLIENT_ID:
             raise HTTPException(
@@ -107,7 +105,7 @@ async def apple_authorize(
         query_string = "&".join([f"{k}={v}" for k, v in params.items()])
         authorization_url = f"{base_url}?{query_string}"
         
-        logger.info(f"Generated Apple authorization URL: {authorization_url}")
+        info(f"Generated Apple authorization URL: {authorization_url}")
         
         return {
             "authorization_url": authorization_url,
@@ -115,7 +113,7 @@ async def apple_authorize(
         }
         
     except Exception as e:
-        logger.error(f"Apple OAuth authorization error: {e}")
+        error(f"Apple OAuth authorization error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to initiate Apple OAuth flow"
@@ -133,7 +131,7 @@ async def apple_callback(request: AppleCallbackRequest):
         dict: Access token and user information
     """
     try:
-        logger.info(f"Processing Apple OAuth callback with code: {request.code[:20]}...")
+        info(f"Processing Apple OAuth callback with code: {request.code[:20]}...")
         
         # Extract redirect from state if present
         import json
@@ -142,9 +140,9 @@ async def apple_callback(request: AppleCallbackRequest):
             try:
                 state_data = json.loads(request.state)
                 redirect_path = state_data.get('redirect')
-                logger.info(f"Extracted redirect from state: {redirect_path}")
+                info(f"Extracted redirect from state: {redirect_path}")
             except (json.JSONDecodeError, AttributeError):
-                logger.warning(f"Failed to parse state: {request.state}")
+                warning(f"Failed to parse state: {request.state}")
         
         # Create client secret
         client_secret = create_client_secret()
@@ -166,7 +164,7 @@ async def apple_callback(request: AppleCallbackRequest):
         )
         
         if token_response.status_code != 200:
-            logger.error(f"Apple token exchange failed: {token_response.text}")
+            error(f"Apple token exchange failed: {token_response.text}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Failed to exchange Apple authorization code"
@@ -186,7 +184,7 @@ async def apple_callback(request: AppleCallbackRequest):
         apple_oauth = AppleOAuth()
         user_info = apple_oauth.get_user_info(id_token)
         
-        logger.info(f"Successfully retrieved Apple user info for: {user_info.get('email')}")
+        info(f"Successfully retrieved Apple user info for: {user_info.get('email')}")
         
         # Import authentication utilities
         from .jwt_utils import create_user_token
@@ -205,14 +203,14 @@ async def apple_callback(request: AppleCallbackRequest):
             waitlist_entry = waitlist_repo.get_waitlist_by_email(user_info['email'])
             
             if not waitlist_entry:
-                logger.warning(f"User not on waitlist: {user_info['email']}")
+                warning(f"User not on waitlist: {user_info['email']}")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="not_on_waitlist"
                 )
             
             if not waitlist_entry.get('approved', False):
-                logger.warning(f"User not approved on waitlist: {user_info['email']}")
+                warning(f"User not approved on waitlist: {user_info['email']}")
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="not_approved"
@@ -234,10 +232,10 @@ async def apple_callback(request: AppleCallbackRequest):
                     detail="Failed to create user account"
                 )
             user = user_repo.get_by_id(user_id)
-            logger.info(f"Created new Apple OAuth user: {user_info['email']}")
+            info(f"Created new Apple OAuth user: {user_info['email']}")
         else:
             user = existing_user
-            logger.info(f"Apple OAuth login for existing user: {user_info['email']}")
+            info(f"Apple OAuth login for existing user: {user_info['email']}")
         
         # Create JWT token
         access_token = create_user_token(user['id'], user['email'])
@@ -259,14 +257,14 @@ async def apple_callback(request: AppleCallbackRequest):
         # Include redirect path if it was in the state
         if redirect_path:
             response_data['redirect'] = redirect_path
-            logger.info(f"Including redirect in response: {redirect_path}")
+            info(f"Including redirect in response: {redirect_path}")
         
         return response_data
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Apple OAuth callback error: {e}")
+        error(f"Apple OAuth callback error: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to process Apple OAuth callback"

@@ -4,11 +4,12 @@ uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 
 # Database dependencies
+# Firestore removed - no longer needed for local OSS usage
 
 # Google Cloud dependencies
-google-cloud-firestore==2.13.1
-google-cloud-storage==2.10.0
-google-cloud-secret-manager==2.16.4
+# google-cloud-firestore==2.13.1  # Removed - no longer needed
+# google-cloud-storage==2.10.0    # Removed - no longer needed
+# google-cloud-secret-manager==2.16.4  # Removed - no longer needed
 google-auth==2.23.4
 google-auth-oauthlib==1.1.0
 google-auth-httplib2==0.1.1
