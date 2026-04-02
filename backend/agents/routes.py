@@ -5,9 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, Header, Query
 from fastapi.security import HTTPBearer
 from typing import Optional, List, Dict, Any
 
-# Auth disabled - Firestore dependency from rooster
-# from auth.jwt_utils import verify_token as verify_jwt_token
-# from auth.routes import verify_middleware_token
+# Auth removed for OSS mode
 from .orchestrator import OrchestratorAgent
 from .models import ChatRequest, ChatResponse
 from .constants import MAX_CHAT_HISTORY_CONTEXT
@@ -50,8 +48,8 @@ async def process_chat_message(
     Process a chat message through the multi-agent vacation planning system
     """
     try:
-        info(f"Processing chat message for user {user_id}: {chat_request.message[:100]}...", "AgentRoutes")
-        info(f"Chat request session_id: {chat_request.session_id}", "AgentRoutes")
+        info(f"Processing chat message for user {user_id}: {chat_request.message[:100]}...")
+        info(f"Chat request session_id: {chat_request.session_id}")
         
         # Initialize orchestrator (now uses shared session storage)
         orchestrator = OrchestratorAgent()
@@ -59,11 +57,11 @@ async def process_chat_message(
         # Process through orchestrator
         response = await orchestrator.process_chat_message(user_id, chat_request)
         
-        info(f"Chat processing completed for user {user_id}, session {response.session_id}", "AgentRoutes")
+        info(f"Chat processing completed for user {user_id}, session {response.session_id}")
         
         # Log response structure for debugging
         if response.itinerary_data:
-            info(f"Response includes itinerary data with status: {response.itinerary_data.status}", "AgentRoutes")
+            info(f"Response includes itinerary data with status: {response.itinerary_data.status}")
             info(f"Itinerary content length: {len(response.itinerary_data.markdown_content) if response.itinerary_data.markdown_content else 0}", "AgentRoutes")
         
         return response
@@ -126,7 +124,7 @@ async def get_session_info(
     except HTTPException:
         raise
     except Exception as e:
-        error(f"Error getting session info for {session_id}: {e}", "AgentRoutes")
+        error(f"Error getting session info for {session_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get session information"
@@ -171,7 +169,7 @@ async def clear_session(
     except HTTPException:
         raise
     except Exception as e:
-        error(f"Error clearing session {session_id}: {e}", "AgentRoutes")
+        error(f"Error clearing session {session_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to clear session"
@@ -203,7 +201,7 @@ async def health_check():
         }
         
     except Exception as e:
-        error(f"Health check failed: {e}", "AgentRoutes")
+        error(f"Health check failed: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Multi-agent system health check failed"
@@ -232,7 +230,7 @@ async def get_agents_info(user_id: str = Depends(get_current_user_id)):
         }
         
     except Exception as e:
-        error(f"Error getting agents info: {e}", "AgentRoutes")
+        error(f"Error getting agents info: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get agents information"

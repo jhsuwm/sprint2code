@@ -40,7 +40,7 @@ class OrchestratorAgent(BaseAgent):
         Main entry point for processing user chat messages
         """
         try:
-            info(f"Orchestrator received session_id: {chat_request.session_id} for user {user_id}", "Orchestrator")
+            info(f"Orchestrator received session_id: {chat_request.session_id} for user {user_id}")
             
             # Get or create planning session
             session = self._get_or_create_session(user_id, chat_request.session_id)
@@ -71,7 +71,7 @@ class OrchestratorAgent(BaseAgent):
             session.updated_at = datetime.now()
             self.active_sessions[session.session_id] = session
             
-            info(f"Chat conversation processed for user {user_id}", "Orchestrator")
+            info(f"Chat conversation processed for user {user_id}")
             
             return ChatResponse(
                 message=assistant_message or "Processing your request...",
@@ -82,7 +82,7 @@ class OrchestratorAgent(BaseAgent):
             )
             
         except Exception as e:
-            error(f"Error processing chat message: {e}", "Orchestrator")
+            error(f"Error processing chat message: {e}")
             import traceback
             error(f"Full traceback: {traceback.format_exc()}", "Orchestrator")
             

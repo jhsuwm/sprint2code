@@ -7,7 +7,7 @@ import re
 import yaml
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
-from log_config import logger, error
+from log_config import logger, error, info
 from agents.job_manager import job_store
 from agents.deployment_validator import DeploymentValidator
 from agents.deployment_fixer import DeploymentFixer
@@ -182,7 +182,7 @@ class DeploymentManager:
             self.job_manager.log(job_id, "❌ Local startup timed out after 10 minutes.", "Startup Failed", level="ERROR")
             job_store[job_id]["app_status"] = "FAILED"
         except Exception as e:
-            error(f"Local deployment failed: {e}", "DeploymentManager")
+            error(f"Local deployment failed: {e}")
             self.job_manager.log(job_id, f"Local deployment failed: {e}", "Deployment Failed", level="ERROR")
             job_store[job_id]["app_status"] = "FAILED"
 

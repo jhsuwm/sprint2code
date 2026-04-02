@@ -10,15 +10,6 @@ python-multipart==0.0.6
 # google-cloud-firestore==2.13.1  # Removed - no longer needed
 # google-cloud-storage==2.10.0    # Removed - no longer needed
 # google-cloud-secret-manager==2.16.4  # Removed - no longer needed
-google-auth==2.23.4
-google-auth-oauthlib==1.1.0
-google-auth-httplib2==0.1.1
-
-# Authentication and security
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-bcrypt==4.0.1
-PyJWT==2.8.0
 
 # Environment and configuration
 python-dotenv==1.0.0
@@ -26,7 +17,7 @@ pydantic==2.5.0
 pydantic-settings==2.1.0
 email-validator==2.1.0
 
-# HTTP requests for OAuth
+# HTTP requests
 requests==2.31.0
 
 # Media processing dependencies

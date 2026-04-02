@@ -29,23 +29,9 @@ class EnhancedFormatter(logging.Formatter):
         record.user_id = user_id or 'unknown'
         record.session_id = session_id or 'unknown'
         
-        # Use the original format but insert user context after log level
-        original_format = super().format(record)
-        
-        # Parse the original format: [timestamp] [level] [agent_module] message
-        # Insert user context after level: [timestamp] [level] [user_id:session_id] [agent_module] message
-        parts = original_format.split('] ', 3)
-        if len(parts) >= 3:
-            timestamp_part = parts[0] + ']'
-            level_part = parts[1] + ']'
-            user_context = f'[{record.user_id}:{record.session_id}]'
-            agent_and_message = '] '.join(parts[2:])
-            
-            return f"{timestamp_part} {level_part} {user_context} {agent_and_message}"
-        else:
-            # Fallback if format doesn't match expected pattern
-            user_context = f'[{record.user_id}:{record.session_id}]'
-            return f"{original_format} {user_context}"
+        # Use the original format without injecting user context.
+        # User sessions are not tracked in this local OSS mode, so avoid unknown tags.
+        return super().format(record)
 
 class GoogleAPIMetricsLogger:
     """

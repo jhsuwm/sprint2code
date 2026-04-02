@@ -9,7 +9,7 @@ import socket
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 from typing import Dict, Any, Optional, List, Tuple
-from log_config import logger, error
+from log_config import logger, error, info
 
 
 class LocalAppService:
@@ -172,7 +172,7 @@ class LocalAppService:
         
         except Exception as e:
             error_msg = f"Error starting app locally: {str(e)}"
-            error(error_msg, "LocalAppService")
+            error(error_msg)
             # Clean up any processes
             await self._stop_all(job_id)
             self.last_startup_diagnostics['phase'] = 'startup_exception'

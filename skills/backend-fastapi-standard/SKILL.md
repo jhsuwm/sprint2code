@@ -14,7 +14,7 @@ Example: `github_repository: https://github.com/my-org/my-backend-service`
 ## Stack
 - Python `3.11+`
 - FastAPI
-- Pydantic models
+- Pydantic V2 models (use `model_config = ConfigDict(...)` instead of `class Config`, `json_schema_extra` instead of `schema_extra`)
 - Firestore repository pattern
 - JWT-based auth
 
@@ -29,6 +29,7 @@ Example: `github_repository: https://github.com/my-org/my-backend-service`
 8. `tests/`
 
 ## Rules
+- Use Pydantic V2 syntax: `model_config = ConfigDict(...)` instead of `class Config`, `json_schema_extra` instead of `schema_extra`, `from_attributes=True` in ConfigDict
 - Do not leave unresolved imports.
 - Keep route handlers thin; business logic belongs in services.
 - Use typed request/response models.

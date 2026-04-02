@@ -95,6 +95,31 @@ fastapi==0.104.1
     else:
         print("FAILED: No invalid requirement extracted.")
 
+
+def test_no_legacy_info_error_args():
+    print("\nTesting for direct logger.info/logger.error calls (should use wrapper functions)...")
+    matches = []
+    skip_dirs = {'venv', '__pycache__', 'node_modules', '.git', 'deployments'}
+    for root, dirs, files in os.walk('backend'):
+        # Skip unwanted directories
+        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        for f in files:
+            if f.endswith('.py') and f not in {'log_config.py', 'enhanced_logging.py', 'base_agent.py'}:
+                path = os.path.join(root, f)
+                text = open(path, 'r', encoding='utf-8').read()
+                # Detect direct logger.info or logger.error calls (should use wrapper functions)
+                for regex in [r"\blogger\.info\b", r"\blogger\.error\b", r"\blogger\.warning\b", r"\blogger\.debug\b", r"\blogger\.critical\b"]:
+                    if re.search(regex, text):
+                        matches.append((path, regex))
+    if matches:
+        print('FAILED: Found direct logger calls (should use wrapper functions):')
+        for path, regex in matches:
+            print(f'  {path}: {regex}')
+        raise AssertionError('Direct logger calls found - use wrapper functions from log_config')
+    else:
+        print('PASS: No direct logger calls detected')
+
 if __name__ == "__main__":
     test_requirements_cleanup()
     test_pip_exception_parsing()
+    test_no_legacy_info_error_args()

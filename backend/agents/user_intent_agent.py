@@ -84,7 +84,7 @@ Based on the conversation, extract relevant preferences.
                 return UserPreferences()
                 
         except Exception as e:
-            error(f"Error in _extract_preferences: {e}", "UserIntentAgent")
+            error(f"Error in _extract_preferences: {e}")
             return UserPreferences()
     
     async def _identify_clarifications(self, preferences: UserPreferences, user_message: str, context: str = "") -> List[str]:

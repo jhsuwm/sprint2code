@@ -84,20 +84,20 @@ class GitHubService:
                 if rate_limit:
                     info(f"GitHub API rate limit: {rate_limit} requests remaining")
             elif response.status_code == 401:
-                error("✗ GitHub token validation FAILED: 401 Unauthorized. Token may be invalid or expired.", "GitHubService")
+                error("✗ GitHub token validation FAILED: 401 Unauthorized. Token may be invalid or expired.")
                 error(f"Response: {response.text}")
                 error("SOLUTION: Generate a new Classic Personal Access Token at https://github.com/settings/tokens")
             elif response.status_code == 403:
-                error("✗ GitHub token validation FAILED: 403 Forbidden. Token may lack required permissions.", "GitHubService")
+                error("✗ GitHub token validation FAILED: 403 Forbidden. Token may lack required permissions.")
                 error(f"Response: {response.text}")
                 error("SOLUTION: Ensure token has 'repo' scope permissions")
             else:
-                error(f"✗ GitHub token validation returned unexpected status: {response.status_code}", "GitHubService")
+                error(f"✗ GitHub token validation returned unexpected status: {response.status_code}")
                 error(f"Response: {response.text}")
         except requests.exceptions.Timeout:
             warning("GitHub token validation timed out. Network may be slow.")
         except Exception as e:
-            error(f"Error validating GitHub token: {e}", "GitHubService")
+            error(f"Error validating GitHub token: {e}")
 
     def _make_github_api_request_with_repo_fallback(self, method: str, url_template: str, owner: str, repo: str, **kwargs) -> requests.Response:
         """
@@ -214,7 +214,7 @@ class GitHubService:
         try:
             response = requests.get(url, headers=self.headers)
             if response.status_code == 404:
-                error(f"Repository {owner}/{repo} not found. If this is a private repo, ensure your GitHub token has access to it.", "GitHubService")
+                error(f"Repository {owner}/{repo} not found. If this is a private repo, ensure your GitHub token has access to it.")
                 error(f"💡 SOLUTION: The GitHub token may need access to this private repository.")
                 error(f"   1. Go to https://github.com/settings/tokens")
                 error(f"   2. Regenerate your token or create a new one")
@@ -227,10 +227,10 @@ class GitHubService:
             info(f"Default branch for {owner}/{repo}: {default_branch}")
             return default_branch
         except requests.exceptions.HTTPError as e:
-            error(f"Failed to get default branch: {e}", "GitHubService")
+            error(f"Failed to get default branch: {e}")
             return "main"  # Fallback to main
         except Exception as e:
-            error(f"Failed to get default branch: {e}", "GitHubService")
+            error(f"Failed to get default branch: {e}")
             return "main"  # Fallback to main
     
     def get_branch_sha(self, owner: str, repo: str, branch: str, retry_attempts: int = 3, retry_delay: float = 1.0) -> Optional[str]:
@@ -255,10 +255,10 @@ class GitHubService:
                     info(f"Branch {branch} not found (attempt {attempt + 1}/{retry_attempts}), retrying in {retry_delay}s...")
                     time.sleep(retry_delay)
                     continue
-                error(f"Failed to get branch SHA: {e}", "GitHubService")
+                error(f"Failed to get branch SHA: {e}")
                 return None
             except Exception as e:
-                error(f"Failed to get branch SHA: {e}", "GitHubService")
+                error(f"Failed to get branch SHA: {e}")
                 return None
         
         return None
@@ -285,7 +285,7 @@ class GitHubService:
                 info(f"Branch {branch} does not exist in {owner}/{repo}")
             return exists
         except Exception as e:
-            error(f"Error checking if branch exists: {e}", "GitHubService")
+            error(f"Error checking if branch exists: {e}")
             return False
     
     def create_branch(self, owner: str, repo: str, branch_name: str, source_branch: str = None) -> bool:
@@ -330,14 +330,14 @@ class GitHubService:
                 warning(f"Branch {branch_name} might already exist in {owner}/{repo}")
                 return True  # Consider this a success for idempotency
             elif response.status_code == 404:
-                error(f"Repository {owner}/{repo} not found during branch creation. Token may lack access to private repo.", "GitHubService")
+                error(f"Repository {owner}/{repo} not found during branch creation. Token may lack access to private repo.")
                 return False
             else:
-                error(f"Failed to create branch: {response.status_code} - {response.text}", "GitHubService")
+                error(f"Failed to create branch: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
-            error(f"Error creating branch: {e}", "GitHubService")
+            error(f"Error creating branch: {e}")
             return False
     
     def commit_file(self, owner: str, repo: str, branch: str, file_path: str, 
@@ -387,7 +387,7 @@ class GitHubService:
                 return True
             elif response.status_code == 403:
                 # Permission error - log reference to documentation
-                error(f"Failed to commit file: 403 Forbidden - {response.text}", "GitHubService")
+                error(f"Failed to commit file: 403 Forbidden - {response.text}")
                 error(f"🚨 GITHUB TOKEN PERMISSION ERROR: Token lacks permissions for {owner}/{repo}")
                 error(f"📖 See GITHUB_TOKEN_PERMISSIONS.md for detailed fix instructions")
                 error(f"Quick fix: Generate new token at https://github.com/settings/tokens with 'repo' scope")
@@ -398,11 +398,11 @@ class GitHubService:
                 info(f"Retrying {file_path} with tree API to ensure parent directories exist...")
                 return self._commit_file_with_tree_api(owner, repo, branch, file_path, content, commit_message)
             else:
-                error(f"Failed to commit file: {response.status_code} - {response.text}", "GitHubService")
+                error(f"Failed to commit file: {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
-            error(f"Error committing file: {e}", "GitHubService")
+            error(f"Error committing file: {e}")
             return False
     
     def _commit_file_with_tree_api(self, owner: str, repo: str, branch: str, 
@@ -417,7 +417,7 @@ class GitHubService:
             ref_response = requests.get(ref_url, headers=self.headers)
             
             if ref_response.status_code != 200:
-                error(f"Failed to get branch ref: {ref_response.status_code}", "GitHubService")
+                error(f"Failed to get branch ref: {ref_response.status_code}")
                 return False
             
             latest_commit_sha = ref_response.json()["object"]["sha"]
@@ -427,7 +427,7 @@ class GitHubService:
             commit_response = requests.get(commit_url, headers=self.headers)
             
             if commit_response.status_code != 200:
-                error(f"Failed to get commit: {commit_response.status_code}", "GitHubService")
+                error(f"Failed to get commit: {commit_response.status_code}")
                 return False
             
             base_tree_sha = commit_response.json()["tree"]["sha"]
@@ -441,7 +441,7 @@ class GitHubService:
             blob_response = requests.post(blob_url, headers=self.headers, json=blob_payload)
             
             if blob_response.status_code != 201:
-                error(f"Failed to create blob: {blob_response.status_code}", "GitHubService")
+                error(f"Failed to create blob: {blob_response.status_code}")
                 return False
             
             blob_sha = blob_response.json()["sha"]
@@ -462,7 +462,7 @@ class GitHubService:
             tree_response = requests.post(tree_url, headers=self.headers, json=tree_payload)
             
             if tree_response.status_code != 201:
-                error(f"Failed to create tree: {tree_response.status_code} - {tree_response.text}", "GitHubService")
+                error(f"Failed to create tree: {tree_response.status_code} - {tree_response.text}")
                 return False
             
             new_tree_sha = tree_response.json()["sha"]
@@ -477,7 +477,7 @@ class GitHubService:
             commit_create_response = requests.post(commit_create_url, headers=self.headers, json=commit_payload)
             
             if commit_create_response.status_code != 201:
-                error(f"Failed to create commit: {commit_create_response.status_code}", "GitHubService")
+                error(f"Failed to create commit: {commit_create_response.status_code}")
                 return False
             
             new_commit_sha = commit_create_response.json()["sha"]
@@ -493,11 +493,11 @@ class GitHubService:
                 info(f"Successfully committed {file_path} to {owner}/{repo}:{branch} using tree API")
                 return True
             else:
-                error(f"Failed to update ref: {ref_update_response.status_code}", "GitHubService")
+                error(f"Failed to update ref: {ref_update_response.status_code}")
                 return False
                 
         except Exception as e:
-            error(f"Error in tree API commit: {e}", "GitHubService")
+            error(f"Error in tree API commit: {e}")
             return False
     
     def list_files(self, owner: str, repo: str, branch: str) -> List[str]:
@@ -515,7 +515,7 @@ class GitHubService:
                 warning(f"Failed to list files: {response.status_code}")
                 return []
         except Exception as e:
-            error(f"Error listing files: {e}", "GitHubService")
+            error(f"Error listing files: {e}")
             return []
 
     def create_pull_request(self, owner: str, repo: str, head_branch: str, 
@@ -552,9 +552,9 @@ class GitHubService:
                 info(f"Successfully created PR: {pr_url}")
                 return pr_url
             else:
-                error(f"Failed to create PR: {response.status_code} - {response.text}", "GitHubService")
+                error(f"Failed to create PR: {response.status_code} - {response.text}")
                 return None
                 
         except Exception as e:
-            error(f"Error creating pull request: {e}", "GitHubService")
+            error(f"Error creating pull request: {e}")
             return None

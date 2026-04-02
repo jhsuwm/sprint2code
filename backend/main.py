@@ -15,9 +15,6 @@ load_dotenv()
 import log_config
 from log_config import error
 
-# Import authentication routes - DISABLED (Firestore dependency from rooster)
-# from auth.routes import router as auth_router
-
 # Import agents routes
 from agents.routes import router as agents_router
 

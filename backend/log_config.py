@@ -102,7 +102,7 @@ class CustomLogger(logging.Logger):
 
 class EnhancedFormatter(logging.Formatter):
     """
-    Enhanced formatter that adds ISO timestamp, caller module:function, and user context to log messages.
+    Enhanced formatter that adds ISO timestamp and caller module:function to log messages.
     Works seamlessly with CustomLogger to ensure complete logging information.
     """
     
@@ -110,29 +110,14 @@ class EnhancedFormatter(logging.Formatter):
         # Add timestamp to the record
         timestamp = datetime.now().isoformat()
         
-        # Get user context from enhanced_logging
-        from utils.enhanced_logging import _context
-        user_id = getattr(_context, 'user_id', None) or 'unknown'
-        session_id = getattr(_context, 'session_id', None) or 'unknown'
-        user_context = f"{user_id}:{session_id}"
-        
         # Get caller module:function from the custom logger
         caller_info = getattr(record, 'caller_module_func', 'unknown:unknown')
         
         # Format the message
         message = record.getMessage()
         
-        # Define format with timestamp, log level, user context, caller info, and message
-        if record.levelno >= logging.ERROR:
-            # Error and critical messages get more detail
-            format_str = f'[{timestamp}] [{record.levelname}] [{user_context}] [{caller_info}] {message}'
-        elif record.levelno >= logging.WARNING:
-            # Warning messages
-            format_str = f'[{timestamp}] [{record.levelname}] [{user_context}] [{caller_info}] {message}'
-        else:
-            # Info and debug messages
-            format_str = f'[{timestamp}] [{record.levelname}] [{user_context}] [{caller_info}] {message}'
-        
+        # Define format with timestamp, log level, caller info, and message
+        format_str = f'[{timestamp}] [{record.levelname}] [{caller_info}] {message}'
         return format_str
 
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
@@ -192,40 +177,40 @@ setup_logging()
 # This will be a CustomLogger instance that automatically captures caller info
 logger = logging.getLogger('rooster_api')
 
-# Wrapper functions for backward compatibility
-# These are optional - the logger object itself now handles caller detection
+# Wrapper functions
+# The log prefix is now based on actual caller module:function from CustomLogger.
+# No manual legacy module_tag argument is required.
 def info(message: str):
     """
     Log info message with automatic module and function detection.
-    All caller info is captured automatically by CustomLogger.
     """
     logger.info(message)
+
 
 def debug(message: str):
     """
     Log debug message with automatic module and function detection.
-    All caller info is captured automatically by CustomLogger.
     """
     logger.debug(message)
+
 
 def warning(message: str):
     """
     Log warning message with automatic module and function detection.
-    All caller info is captured automatically by CustomLogger.
     """
     logger.warning(message)
+
 
 def error(message: str):
     """
     Log error message with automatic module and function detection.
-    All caller info is captured automatically by CustomLogger.
     """
     logger.error(message)
+
 
 def critical(message: str):
     """
     Log critical message with automatic module and function detection.
-    All caller info is captured automatically by CustomLogger.
     """
     logger.critical(message)
 
