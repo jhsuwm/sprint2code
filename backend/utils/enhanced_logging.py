@@ -5,22 +5,12 @@ Adds user_id and session_id fields to all log lines and implements Google API ca
 
 import os
 import logging
-import time
-import json
 from datetime import datetime
 from typing import Optional, Dict, Any, Union
 from functools import wraps
 from contextlib import contextmanager
 import asyncio
 import threading
-
-# Import Firestore for metrics storage
-try:
-    from google.cloud import firestore
-    from database.firestore_config import get_firestore_client
-    FIRESTORE_AVAILABLE = True
-except ImportError:
-    FIRESTORE_AVAILABLE = False
 
 # Thread-local storage for user context
 _context = threading.local()
@@ -39,32 +29,17 @@ class EnhancedFormatter(logging.Formatter):
         record.user_id = user_id or 'unknown'
         record.session_id = session_id or 'unknown'
         
-        # Use the original format but insert user context after log level
-        original_format = super().format(record)
-        
-        # Parse the original format: [timestamp] [level] [agent_module] message
-        # Insert user context after level: [timestamp] [level] [user_id:session_id] [agent_module] message
-        parts = original_format.split('] ', 3)
-        if len(parts) >= 3:
-            timestamp_part = parts[0] + ']'
-            level_part = parts[1] + ']'
-            user_context = f'[{record.user_id}:{record.session_id}]'
-            agent_and_message = '] '.join(parts[2:])
-            
-            return f"{timestamp_part} {level_part} {user_context} {agent_and_message}"
-        else:
-            # Fallback if format doesn't match expected pattern
-            user_context = f'[{record.user_id}:{record.session_id}]'
-            return f"{original_format} {user_context}"
+        # Use the original format without injecting user context.
+        # User sessions are not tracked in this local OSS mode, so avoid unknown tags.
+        return super().format(record)
 
 class GoogleAPIMetricsLogger:
     """
-    Logger for Google API call metrics with Firestore storage
+    Logger for Google API call metrics
     """
     
     def __init__(self):
         self.logger = logging.getLogger('google_api_metrics')
-        self.firestore_client = get_firestore_client() if FIRESTORE_AVAILABLE else None
         
     async def log_google_ai_call(self,
                                 api_name: str,
@@ -121,12 +96,6 @@ class GoogleAPIMetricsLogger:
             code_info = source_location if source_location else "unknown"
             token_info = f"{input_tokens or 'null'}/{output_tokens or 'null'}"
             self.logger.info(f"Google AI_API Call: {api_name} - Code: {code_info} - Success: {success} - Tokens: {token_info} - Time: {response_time_int} ms")
-            
-            # Store in Firestore
-            if self.firestore_client:
-                await self._store_metrics_async(metrics)
-            else:
-                self.logger.warning("Firestore not available, metrics not stored")
                 
         except Exception as e:
             self.logger.error(f"Error logging Google AI metrics: {e}")
@@ -189,35 +158,9 @@ class GoogleAPIMetricsLogger:
             code_info = source_location if source_location else "unknown"
             # Non-AI Google APIs don't use tokens, so we include 0/0 for consistent log format
             self.logger.info(f"Google API Call: {api_name} - Code: {code_info} - Success: {success} - Tokens: 0/0 - Time: {response_time_int} ms")
-            
-            # Store in Firestore
-            if self.firestore_client:
-                await self._store_metrics_async(metrics)
-            else:
-                self.logger.warning("Firestore not available, metrics not stored")
                 
         except Exception as e:
             self.logger.error(f"Error logging Google API metrics: {e}")
-    
-    async def _store_metrics_async(self, metrics: Dict[str, Any]):
-        """
-        Store metrics in Firestore asynchronously
-        """
-        try:
-            # Run Firestore operation in thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self._store_metrics_sync, metrics)
-        except Exception as e:
-            self.logger.error(f"Error storing metrics in Firestore: {e}")
-    
-    def _store_metrics_sync(self, metrics: Dict[str, Any]):
-        """
-        Store metrics in Firestore synchronously
-        DISABLED: To save costs, Firestore logging is disabled
-        """
-        # Firestore logging disabled to save costs
-        # The metrics are still logged to console/files via the logger.info calls
-        pass
 
 # Global metrics logger instance
 _metrics_logger = GoogleAPIMetricsLogger()

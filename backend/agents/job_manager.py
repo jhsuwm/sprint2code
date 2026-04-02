@@ -1,7 +1,7 @@
 import uuid
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from log_config import logger, error
+from log_config import logger, error, info, warning, debug
 
 # Global job store (In-memory for simplicity)
 job_store: Dict[str, Dict[str, Any]] = {}
@@ -59,12 +59,14 @@ class JobManager:
                 if not job["steps"] or job["steps"][-1]["name"] != step:
                     job["steps"].append({"name": step, "status": "COMPLETED", "timestamp": timestamp})
             
+            # Use the new auto-detecting logging functions
+            full_message = f"Job {job_id}: {message}"
             if level == "ERROR":
-                error(f"Job {job_id}: {message}", "AutonomousDevAgent")
+                error(full_message)
             elif level == "WARNING":
-                logger.warning(f"Job {job_id}: {message}")
+                warning(full_message)
             else:
-                logger.info(f"Job {job_id}: {message}")
+                info(full_message)
 
     def split_logs_into_chunks(self, logs: List[str], max_logs_per_chunk: int = 50) -> List[List[str]]:
         chunks = []

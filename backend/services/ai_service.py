@@ -227,7 +227,7 @@ class AIService:
         elif self.vendor == "gemini":
             self._init_gemini()
         else:
-            error(f"Unknown AI_VENDOR: {self.vendor}. Supported: gemini, anthropic, openai, openrouter", "AIService")
+            error(f"Unknown AI_VENDOR: {self.vendor}. Supported: gemini, anthropic, openai, openrouter")
             logger.warning("Defaulting to gemini")
             self.vendor = "gemini"
             self._init_gemini()
@@ -248,7 +248,7 @@ class AIService:
         try:
             from google import genai
         except ImportError:
-            error("google-genai package not installed. Install with: pip install google-genai", "AIService")
+            error("google-genai package not installed. Install with: pip install google-genai")
             return
         
         self.api_key = os.getenv("GEMINI_API_KEY")
@@ -267,7 +267,7 @@ class AIService:
                 self.client = genai.Client(api_key=self.api_key)
                 logger.info(f"AIService (Gemini) initialized with model: {self.model_name}")
             except Exception as e:
-                error(f"Failed to initialize Gemini client: {e}", "AIService")
+                error(f"Failed to initialize Gemini client: {e}")
         else:
             logger.warning("GEMINI_API_KEY not found. AIService will mock Gemini responses.")
     
@@ -278,7 +278,7 @@ class AIService:
             self.Anthropic = Anthropic
             self.AsyncAnthropic = AsyncAnthropic
         except ImportError:
-            error("anthropic package not installed. Install with: pip install anthropic", "AIService")
+            error("anthropic package not installed. Install with: pip install anthropic")
             return
         
         self.api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -296,7 +296,7 @@ class AIService:
                     self.async_client = self.AsyncAnthropic(api_key=self.api_key)
                 logger.info(f"AIService (Anthropic) initialized with model: {self.model_name}")
             except Exception as e:
-                error(f"Failed to initialize Anthropic client: {e}", "AIService")
+                error(f"Failed to initialize Anthropic client: {e}")
         else:
             logger.warning("ANTHROPIC_API_KEY not found. AIService will mock Anthropic responses.")
     
@@ -306,7 +306,7 @@ class AIService:
             from openai import AsyncOpenAI
             self.AsyncOpenAI = AsyncOpenAI
         except ImportError:
-            error("openai package not installed. Install with: pip install openai", "AIService")
+            error("openai package not installed. Install with: pip install openai")
             return
         
         self.api_key = os.getenv("OPENAI_API_KEY")
@@ -324,7 +324,7 @@ class AIService:
                     self.async_client = self.AsyncOpenAI(api_key=self.api_key)
                 logger.info(f"AIService (OpenAI) initialized with model: {self.model_name}")
             except Exception as e:
-                error(f"Failed to initialize OpenAI client: {e}", "AIService")
+                error(f"Failed to initialize OpenAI client: {e}")
         else:
             logger.warning("OPENAI_API_KEY not found. AIService will mock OpenAI responses.")
     
@@ -334,7 +334,7 @@ class AIService:
             from openai import AsyncOpenAI
             self.AsyncOpenAI = AsyncOpenAI
         except ImportError:
-            error("openai package not installed. Install with: pip install openai", "AIService")
+            error("openai package not installed. Install with: pip install openai")
             return
         
         self.api_key = os.getenv("OPENROUTER_API_KEY")
@@ -349,7 +349,7 @@ class AIService:
                 logger.info(f"AIService (OpenRouter) initialized with model: {self.model_name}")
                 logger.info(f"OpenRouter API URL: {api_url}")
             except Exception as e:
-                error(f"Failed to initialize OpenRouter client: {e}", "AIService")
+                error(f"Failed to initialize OpenRouter client: {e}")
         else:
             logger.warning("OPENROUTER_API_KEY not found. AIService will mock OpenRouter responses.")
     
@@ -397,7 +397,7 @@ class AIService:
                         f"Please try again later."
                     )
                     logger.error(error_msg)
-                    error(error_msg, "AIService")
+                    error(error_msg)
                     raise Exception(error_msg)
                     
             except Exception as e:
@@ -420,7 +420,7 @@ class AIService:
                             f"Please wait a few minutes and try again later."
                         )
                         logger.error(error_msg)
-                        error(error_msg, "AIService")
+                        error(error_msg)
                         raise Exception(error_msg) from e
                 else:
                     logger.error(f"API call failed with non-retryable error: {error_str}")
@@ -488,7 +488,7 @@ Desc: [Detailed description]
             elif self.vendor == "openrouter":
                 return await self._generate_work_plan_openrouter(prompt)
         except Exception as e:
-            error(f"Work plan generation failed: {e}", "AIService")
+            error(f"Work plan generation failed: {e}")
             if "REMOTE AI MODEL UNAVAILABLE" in str(e) or "AI API TIMEOUT" in str(e):
                 raise
             return "Error generating work plan due to AI service failure."
@@ -642,7 +642,7 @@ Format the output clearly in markdown."""
             elif self.vendor == "openrouter":
                 return await self._generate_prd_openrouter(system_prompt, prompt, attachments)
         except Exception as e:
-            error(f"PRD generation failed: {e}", "AIService")
+            error(f"PRD generation failed: {e}")
             if "REMOTE AI MODEL UNAVAILABLE" in str(e) or "AI API TIMEOUT" in str(e):
                 raise
             return f"Error generating PRD: {str(e)}"
@@ -802,7 +802,7 @@ class User(BaseModel):
             logger.info(f"🤖 [AIService] AI Response received. Length: {len(text)} characters, Finish Reason: {reason}")
             return (text, reason)
         except Exception as e:
-            error(f"Code generation failed: {e}", "AIService")
+            error(f"Code generation failed: {e}")
             if "REMOTE AI MODEL UNAVAILABLE" in str(e) or "AI API TIMEOUT" in str(e):
                 raise
             return (f"FILE_PATH: error.txt\n---\n# Error: {str(e)}\n---", 'ERROR')

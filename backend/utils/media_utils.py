@@ -103,7 +103,7 @@ class MediaProcessor:
             }
             
         except Exception as e:
-            error(f"Error validating file {filename}: {e}", "MediaProcessor")
+            error(f"Error validating file {filename}: {e}")
             return {
                 'valid': False,
                 'error': f'File validation error: {str(e)}'
@@ -169,7 +169,7 @@ class MediaProcessor:
                 }
                 
         except Exception as e:
-            error(f"Error processing image {filename}: {e}", "MediaProcessor")
+            error(f"Error processing image {filename}: {e}")
             return {
                 'success': False,
                 'error': f'Image processing error: {str(e)}'
@@ -203,7 +203,7 @@ class MediaProcessor:
             }
             
         except Exception as e:
-            error(f"Error extracting video metadata from {filename}: {e}", "MediaProcessor")
+            error(f"Error extracting video metadata from {filename}: {e}")
             return {
                 'success': False,
                 'error': f'Video metadata extraction error: {str(e)}'
@@ -303,7 +303,7 @@ class MediaMetadataExtractor:
                 return metadata
                 
         except Exception as e:
-            error(f"Error extracting image metadata: {e}", "MediaMetadataExtractor")
+            error(f"Error extracting image metadata: {e}")
             return {}
     
     @staticmethod
@@ -336,6 +336,6 @@ class MediaMetadataExtractor:
                             return {'latitude': lat, 'longitude': lon}
                 
         except Exception as e:
-            error(f"Error extracting GPS location: {e}", "MediaMetadataExtractor")
+            error(f"Error extracting GPS location: {e}")
         
         return None

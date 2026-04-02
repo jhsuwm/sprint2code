@@ -82,7 +82,7 @@ class RequirementsManager:
                 "Please wait a few minutes for the AI service to recover, then try again."
             )
             self.job_manager.log(job_id, error_msg, "AI Service Unavailable", level="ERROR")
-            error(error_msg, "RequirementsManager")
+            error(error_msg)
             raise Exception(error_msg)
         
         # Subtasks
@@ -184,7 +184,7 @@ class RequirementsManager:
                 "Please retry after AI service stabilizes."
             )
             self.job_manager.log(job_id, error_msg, "Insufficient Subtasks", level="ERROR")
-            error(error_msg, "RequirementsManager")
+            error(error_msg)
             raise Exception(error_msg)
 
         # CRITICAL: Ensure required technical domains from selected skills are represented.
@@ -195,7 +195,7 @@ class RequirementsManager:
                 "Selected skills are mandatory requirements, so code generation was stopped to avoid incomplete implementation."
             )
             self.job_manager.log(job_id, error_msg, "Missing Skill Coverage", level="ERROR")
-            error(error_msg, "RequirementsManager")
+            error(error_msg)
             raise Exception(error_msg)
         
         # CRITICAL: Verify that subtasks were actually parsed
@@ -206,7 +206,7 @@ class RequirementsManager:
                 "Without subtasks, no code can be generated. Please try again later."
             )
             self.job_manager.log(job_id, error_msg, "No Subtasks Parsed", level="ERROR")
-            error(error_msg, "RequirementsManager")
+            error(error_msg)
             raise Exception(error_msg)
         
         self.job_manager.log(
@@ -225,7 +225,7 @@ class RequirementsManager:
                 "Please check JIRA permissions and try again."
             )
             self.job_manager.log(job_id, error_msg, "No Subtasks Created", level="ERROR")
-            error(error_msg, "RequirementsManager")
+            error(error_msg)
             raise Exception(error_msg)
         
         self.job_manager.log(

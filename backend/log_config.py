@@ -2,12 +2,15 @@
 Centralized logging configuration for the ROOSTER API
 Provides consistent timestamp formatting across all backend components
 ENHANCED: Now includes user_id and session_id support for cost reporting
+ENHANCED: Now automatically captures module and function names from caller
+ENHANCED: Custom Logger class ensures all logging methods capture correct caller info
 """
 
 import logging
 import sys
+import inspect
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 # Import enhanced logging system
 from utils.enhanced_logging import (
@@ -25,41 +28,130 @@ from utils.enhanced_logging import (
     critical as enhanced_critical
 )
 
-class TimestampFormatter(logging.Formatter):
-    """Custom formatter that adds ISO timestamp and agent module name to all log messages"""
+class CustomLogger(logging.Logger):
+    """
+    Custom logger that automatically captures the actual caller's module and function name.
+    This ensures accurate caller info even when called through wrapper functions or indirection.
+    """
+    
+    def _get_caller_module_function(self, depth=2):
+        """
+        Get the module name and function name from the actual caller.
+        Skips frames from this logging system to find the real originating code.
+        
+        Args:
+            depth: Number of additional frames to skip beyond standard skips
+        
+        Returns:
+            Tuple of (module_name, function_name)
+        """
+        frame = inspect.currentframe()
+        try:
+            # Skip: _get_caller_module_function -> _log -> [wrapper or direct call] -> actual caller
+            # So we need to skip frames until we find one not in our logging system
+            skip_modules = {'logging', 'log_config', 'enhanced_logging'}
+            skip_module_names = ['logging.', 'log_config', 'enhanced_logging']
+            
+            skipped = 0
+            while frame:
+                module_name = frame.f_globals.get('__name__', 'unknown')
+                function_name = frame.f_code.co_name
+                
+                # Check if this frame is in our logging system
+                is_logging_frame = (
+                    module_name in skip_modules or
+                    any(module_name.startswith(skip) for skip in skip_module_names) or
+                    function_name in ('_log', '_log_internal', 'info', 'debug', 'warning', 'error', 'critical', '_get_caller_module_function')
+                )
+                
+                if not is_logging_frame:
+                    # Found the actual caller
+                    # Remove 'backend.' prefix for cleaner logs
+                    if module_name.startswith('backend.'):
+                        module_name = module_name[8:]
+                    return module_name, function_name
+                
+                frame = frame.f_back
+                skipped += 1
+                
+                # Safety check to avoid infinite loops
+                if skipped > 20:
+                    break
+            
+            return 'unknown', 'unknown'
+        finally:
+            del frame
+    
+    def _log(self, level, msg, args, exc_info=None, extra=None, stack_info=None):
+        """
+        Override _log to capture caller module and function automatically.
+        """
+        if extra is None:
+            extra = {}
+        
+        # Get the actual caller's module and function
+        module_name, function_name = self._get_caller_module_function(depth=2)
+        caller_info = f"{module_name}:{function_name}"
+        
+        # Add caller info to extra so it can be used in formatting
+        extra['caller_module_func'] = caller_info
+        
+        # Call parent _log with the extra info
+        super()._log(level, msg, args, exc_info=exc_info, extra=extra, stack_info=stack_info)
+
+
+class EnhancedFormatter(logging.Formatter):
+    """
+    Enhanced formatter that adds ISO timestamp and caller module:function to log messages.
+    Works seamlessly with CustomLogger to ensure complete logging information.
+    """
     
     def format(self, record):
         # Add timestamp to the record
         timestamp = datetime.now().isoformat()
         
-        # Get agent module name from record, default to "NULL" if not provided
-        agent_module = getattr(record, 'agent_module', 'NULL')
+        # Get caller module:function from the custom logger
+        caller_info = getattr(record, 'caller_module_func', 'unknown:unknown')
         
-        # Define format with timestamp, log level, agent module, and message
-        if record.levelno >= logging.ERROR:
-            # Error and critical messages get more detail
-            format_str = f'[{timestamp}] [{record.levelname}] [{agent_module}] {record.name}:{record.lineno} - {record.getMessage()}'
-        elif record.levelno >= logging.WARNING:
-            # Warning messages get module name
-            format_str = f'[{timestamp}] [{record.levelname}] [{agent_module}] {record.name} - {record.getMessage()}'
-        else:
-            # Info and debug messages get basic format
-            format_str = f'[{timestamp}] [{record.levelname}] [{agent_module}] {record.getMessage()}'
+        # Format the message
+        message = record.getMessage()
         
+        # Define format with timestamp, log level, caller info, and message
+        format_str = f'[{timestamp}] [{record.levelname}] [{caller_info}] {message}'
         return format_str
 
 def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
     """
-    Setup centralized logging configuration that automatically applies to all loggers
-    ENHANCED: Now uses enhanced logging system with user context support
+    Setup centralized logging configuration that automatically applies to all loggers.
+    Uses CustomLogger to ensure all logging calls capture correct caller module and function.
     
     Args:
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         log_file: Optional file path to write logs to (in addition to console)
     """
     
-    # Use enhanced logging system instead of legacy system
-    setup_enhanced_logging()
+    # Register CustomLogger as the logger class for the logging module
+    logging.setLoggerClass(CustomLogger)
+    
+    # Get root logger
+    root_logger = logging.getLogger()
+    
+    # Remove existing handlers to avoid duplicates
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Create console handler with our enhanced formatter
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_formatter = EnhancedFormatter()
+    console_handler.setFormatter(console_formatter)
+    
+    # Set logging level
+    log_level = getattr(logging, level.upper(), logging.INFO)
+    root_logger.setLevel(log_level)
+    console_handler.setLevel(log_level)
+    
+    # Add handler to root logger
+    root_logger.addHandler(console_handler)
     
     # Set specific logger levels for noisy libraries (backward compatibility)
     logging.getLogger('urllib3').setLevel(logging.WARNING)
@@ -71,85 +163,58 @@ def setup_logging(level: str = "INFO", log_file: Optional[str] = None):
     
     # If file logging is requested, add file handler to root logger
     if log_file:
-        root_logger = logging.getLogger()
         file_handler = logging.FileHandler(log_file)
-        
-        # Use enhanced formatter for file handler too
-        from utils.enhanced_logging import EnhancedFormatter
-        enhanced_formatter = EnhancedFormatter(
-            fmt='[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
-        )
-        file_handler.setFormatter(enhanced_formatter)
-        file_handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+        file_handler.setFormatter(console_formatter)
+        file_handler.setLevel(log_level)
         root_logger.addHandler(file_handler)
     
-    return logging.getLogger()
+    return root_logger
 
-# Initialize enhanced logging when module is imported
+# Initialize logging with CustomLogger when module is imported
 setup_logging()
 
 # Create a centralized logger instance that the entire codebase can use
+# This will be a CustomLogger instance that automatically captures caller info
 logger = logging.getLogger('rooster_api')
 
-# Export enhanced logging functions for backward compatibility
-def info(message: str, agent_module: str = None):
+# Wrapper functions
+# The log prefix is now based on actual caller module:function from CustomLogger.
+# No manual legacy module_tag argument is required.
+def info(message: str):
     """
-    Log info message with timestamp, user context, and optional agent module
-    ENHANCED: Now includes user_id and session_id in log output
+    Log info message with automatic module and function detection.
     """
-    if agent_module:
-        # If agent_module is provided, use it in the logger name for better organization
-        agent_logger = logging.getLogger(f'rooster_api.{agent_module}')
-        agent_logger.info(message)
-    else:
-        enhanced_info(message)
+    logger.info(message)
 
-def debug(message: str, agent_module: str = None):
-    """
-    Log debug message with timestamp, user context, and optional agent module
-    ENHANCED: Now includes user_id and session_id in log output
-    """
-    if agent_module:
-        agent_logger = logging.getLogger(f'rooster_api.{agent_module}')
-        agent_logger.debug(message)
-    else:
-        enhanced_debug(message)
 
-def warning(message: str, agent_module: str = None):
+def debug(message: str):
     """
-    Log warning message with timestamp, user context, and optional agent module
-    ENHANCED: Now includes user_id and session_id in log output
+    Log debug message with automatic module and function detection.
     """
-    if agent_module:
-        agent_logger = logging.getLogger(f'rooster_api.{agent_module}')
-        agent_logger.warning(message)
-    else:
-        enhanced_warning(message)
+    logger.debug(message)
 
-def error(message: str, agent_module: str = None):
-    """
-    Log error message with timestamp, user context, and optional agent module
-    ENHANCED: Now includes user_id and session_id in log output
-    """
-    if agent_module:
-        agent_logger = logging.getLogger(f'rooster_api.{agent_module}')
-        agent_logger.error(message)
-    else:
-        enhanced_error(message)
 
-def critical(message: str, agent_module: str = None):
+def warning(message: str):
     """
-    Log critical message with timestamp, user context, and optional agent module
-    ENHANCED: Now includes user_id and session_id in log output
+    Log warning message with automatic module and function detection.
     """
-    if agent_module:
-        agent_logger = logging.getLogger(f'rooster_api.{agent_module}')
-        agent_logger.critical(message)
-    else:
-        enhanced_critical(message)
+    logger.warning(message)
 
-# Re-export enhanced logging functions for new code
+
+def error(message: str):
+    """
+    Log error message with automatic module and function detection.
+    """
+    logger.error(message)
+
+
+def critical(message: str):
+    """
+    Log critical message with automatic module and function detection.
+    """
+    logger.critical(message)
+
+# Re-export enhanced logging functions for user context management
 set_user_context = set_user_context
 get_user_context = get_user_context
 clear_user_context = clear_user_context

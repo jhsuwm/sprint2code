@@ -32,3 +32,6 @@ Example: `github_repository: https://github.com/my-org/my-frontend-app`
 - Keep API types and UI props strongly typed.
 - Do not leave TypeScript errors unresolved.
 - Keep reusable UI in `src/components`.
+- Use the Next.js `@/` alias only for `src/`-relative imports.
+- If you reference `@/components/`, `@/store/`, `@/api/`, or `@/types/`, generate the referenced file in the same response when it does not already exist.
+- Use `.tsx` for UI components and `.ts` for stores, API helpers, and type definitions.

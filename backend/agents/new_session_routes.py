@@ -6,8 +6,7 @@ import uuid
 from fastapi import APIRouter, HTTPException, Depends, Header, status
 from typing import Dict, Any, Optional
 from .orchestrator import OrchestratorAgent
-from auth.jwt_utils import verify_token as verify_jwt_token
-from auth.routes import verify_middleware_token
+# Removed auth imports for OSS mode
 
 # Import centralized logging functions
 import sys
@@ -20,35 +19,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 async def get_current_user_id(
-    x_user_token: Optional[str] = Header(None),
-    _: None = Depends(verify_middleware_token)
+    x_user_token: Optional[str] = Header(None)
 ) -> str:
     """
-    Extract user ID from user token passed in X-User-Token header
+    For OSS mode: Return demo user ID
     """
-    if not x_user_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User token is required in X-User-Token header"
-        )
-    
-    try:
-        payload = verify_jwt_token(x_user_token)
-        user_id = payload.get("user_id")
-        
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid token: user_id not found"
-            )
-        
-        return str(user_id)
-        
-    except Exception as e:
-        error(f"Token verification failed: {e}", agent_module="NewSessionRoutes")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token"
+    info("OSS Mode: Returning demo user ID", agent_module="NewSessionRoutes")
+    return "demo-user"
         )
 
 @router.post("/new-session")

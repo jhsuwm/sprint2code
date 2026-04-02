@@ -6,7 +6,7 @@ import mimetypes
 import re
 from requests.auth import HTTPBasicAuth
 from typing import List, Dict, Any, Optional, Tuple
-from log_config import logger, error
+from log_config import logger, error, info, warning
 
 class JiraService:
     def __init__(self):
@@ -20,9 +20,9 @@ class JiraService:
         self.mock_mode = not (self.username and self.api_token)
         
         if self.mock_mode:
-            logger.warning("JiraService started in MOCK MODE. Set JIRA_URL, JIRA_EMAIL/USERNAME, and JIRA_API_TOKEN to use real API.")
+            warning("JiraService started in MOCK MODE. Set JIRA_URL, JIRA_EMAIL/USERNAME, and JIRA_API_TOKEN to use real API.")
         else:
-            logger.info(f"JiraService initialized in REAL MODE connecting to {self.base_url}")
+            info(f"JiraService initialized in REAL MODE connecting to {self.base_url}")
 
     def _get_headers(self):
         return {
@@ -115,7 +115,7 @@ class JiraService:
             
             return result
         except Exception as e:
-            error(f"Failed to fetch JIRA structure: {e}", "JiraService")
+            error(f"Failed to fetch JIRA structure: {e}")
             return []
 
     def get_todo_stories(self, user_email: str = None) -> List[Dict[str, Any]]:
@@ -171,7 +171,7 @@ class JiraService:
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            error(f"Failed to fetch JIRA story details: {e}", "JiraService")
+            error(f"Failed to fetch JIRA story details: {e}")
             return {}
     
     def get_issue_attachments(self, issue_id: str) -> List[Dict[str, Any]]:
@@ -182,7 +182,7 @@ class JiraService:
             List of attachment metadata dicts with keys: id, filename, mimeType, size, content (url)
         """
         if self.mock_mode:
-            logger.info(f"[Mock] Getting attachments for issue {issue_id}")
+            info(f"[Mock] Getting attachments for issue {issue_id}")
             return []
         
         url = f"{self.base_url}/rest/api/3/issue/{issue_id}"
@@ -197,10 +197,10 @@ class JiraService:
             issue_data = response.json()
             attachments = issue_data.get("fields", {}).get("attachment", [])
             
-            logger.info(f"Found {len(attachments)} attachment(s) for issue {issue_id}")
+            info(f"Found {len(attachments)} attachment(s) for issue {issue_id}")
             return attachments
         except Exception as e:
-            error(f"Failed to fetch attachments for issue {issue_id}: {e}", "JiraService")
+            error(f"Failed to fetch attachments for issue {issue_id}: {e}")
             return []
     
     def identify_attachment_type(self, attachment: Dict[str, Any]) -> str:
@@ -250,12 +250,12 @@ class JiraService:
             Attachment content as bytes, or None if download fails
         """
         if self.mock_mode:
-            logger.info(f"[Mock] Downloading attachment: {attachment.get('filename', 'unknown')}")
+            info(f"[Mock] Downloading attachment: {attachment.get('filename', 'unknown')}")
             return b"Mock attachment content"
         
         content_url = attachment.get("content")
         if not content_url:
-            error("Attachment has no content URL", "JiraService")
+            error("Attachment has no content URL")
             return None
         
         try:
@@ -268,11 +268,11 @@ class JiraService:
             
             filename = attachment.get("filename", "unknown")
             size = len(response.content)
-            logger.info(f"Downloaded attachment '{filename}' ({size} bytes)")
+            info(f"Downloaded attachment '{filename}' ({size} bytes)")
             
             return response.content
         except Exception as e:
-            error(f"Failed to download attachment: {e}", "JiraService")
+            error(f"Failed to download attachment: {e}")
             return None
 
     def update_issue_status(self, issue_id: str, status_name: str) -> bool:
@@ -281,7 +281,7 @@ class JiraService:
         Note: Transition IDs depend on the workflow. This is a simplified implementation.
         """
         if self.mock_mode:
-            logger.info(f"[Mock] Updated issue {issue_id} to status: {status_name}")
+            info(f"[Mock] Updated issue {issue_id} to status: {status_name}")
             return True
 
         # First, find the transition ID for the target status
@@ -297,7 +297,7 @@ class JiraService:
                 # Fallback: Try strict matching or handle 'In Review' mapping
                 # Mapping common names: "In Progress" -> 31, "Done" -> 41, etc.
                 # Here we just log error if not found
-                error(f"Transition to '{status_name}' not found for issue {issue_id}", "JiraService")
+                error(f"Transition to '{status_name}' not found for issue {issue_id}")
                 return False
 
             # Perform transition
@@ -312,7 +312,7 @@ class JiraService:
             return True
 
         except Exception as e:
-            error(f"Failed to update issue status: {e}", "JiraService")
+            error(f"Failed to update issue status: {e}")
             return False
     
     def create_story(self, summary: str, description: str = "", project_key: str = None, epic_key: str = None) -> Dict[str, Any]:
@@ -328,7 +328,7 @@ class JiraService:
                     "description": description
                 }
             }
-            logger.info(f"[Mock] Created story: {summary} under Epic {epic_key}")
+            info(f"[Mock] Created story: {summary} under Epic {epic_key}")
             return mock_story
 
         # Use provided project_key or fallback to env
@@ -364,11 +364,11 @@ class JiraService:
                 timeout=30
             )
             if not response.ok:
-                error(f"JIRA Error Body: {response.text}", "JiraService")
+                error(f"JIRA Error Body: {response.text}")
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            error(f"Failed to create story: {e}", "JiraService")
+            error(f"Failed to create story: {e}")
             return {}
 
     def update_story_description(self, issue_id: str, description: str) -> bool:
@@ -383,7 +383,7 @@ class JiraService:
             True if successful, False otherwise
         """
         if self.mock_mode:
-            logger.info(f"[Mock] Updated description for {issue_id}")
+            info(f"[Mock] Updated description for {issue_id}")
             return True
         
         url = f"{self.base_url}/rest/api/3/issue/{issue_id}"
@@ -406,10 +406,10 @@ class JiraService:
                 timeout=30
             )
             response.raise_for_status()
-            logger.info(f"Successfully updated description for {issue_id}")
+            info(f"Successfully updated description for {issue_id}")
             return True
         except Exception as e:
-            error(f"Failed to update story description: {e}", "JiraService")
+            error(f"Failed to update story description: {e}")
             return False
     
     def add_attachment(self, issue_id: str, filename: str, content: bytes, mime_type: str = None) -> bool:
@@ -417,7 +417,7 @@ class JiraService:
         Add an attachment to a JIRA issue.
         """
         if self.mock_mode:
-            logger.info(f"[Mock] Added attachment {filename} to {issue_id}")
+            info(f"[Mock] Added attachment {filename} to {issue_id}")
             return True
 
         url = f"{self.base_url}/rest/api/3/issue/{issue_id}/attachments"
@@ -440,7 +440,7 @@ class JiraService:
             response.raise_for_status()
             return True
         except Exception as e:
-            error(f"Failed to add attachment: {e}", "JiraService")
+            error(f"Failed to add attachment: {e}")
             return False
 
     def create_subtask(self, parent_issue_id: str, summary: str, description: str = "") -> Dict[str, Any]:
@@ -457,7 +457,7 @@ class JiraService:
                     "description": description
                 }
             }
-            logger.info(f"[Mock] Created subtask: {summary}")
+            info(f"[Mock] Created subtask: {summary}")
             return mock_subtask
         
         # Retry configuration
@@ -511,7 +511,7 @@ class JiraService:
                 )
                 response.raise_for_status()
                 created_issue = response.json()
-                logger.info(f"Created subtask {created_issue.get('key')}: {summary}")
+                info(f"Created subtask {created_issue.get('key')}: {summary}")
                 return created_issue
                 
             except (requests.exceptions.ConnectionError,
@@ -520,15 +520,15 @@ class JiraService:
                 # Network-related errors that are worth retrying
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
-                    logger.warning(f"Network error creating subtask (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
+                    warning(f"Network error creating subtask (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {wait_time}s...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    error(f"Failed to create subtask after {max_retries} attempts: {e}", "JiraService")
+                    error(f"Failed to create subtask after {max_retries} attempts: {e}")
                     return {}
             except Exception as e:
                 # Other errors (e.g., authentication, validation) - don't retry
-                error(f"Failed to create subtask: {e}", "JiraService")
+                error(f"Failed to create subtask: {e}")
                 return {}
         
         # Should not reach here, but just in case
@@ -540,7 +540,7 @@ class JiraService:
         """
         if self.mock_mode:
             preview = str(comment_content)[:100] if isinstance(comment_content, str) else "ADF document"
-            logger.info(f"[Mock] Added comment to {issue_id}: {preview}...")
+            info(f"[Mock] Added comment to {issue_id}: {preview}...")
             return True
         
         url = f"{self.base_url}/rest/api/3/issue/{issue_id}/comment"
@@ -566,16 +566,16 @@ class JiraService:
             )
             
             if response.status_code == 201:
-                logger.info(f"Successfully added comment to {issue_id}")
+                info(f"Successfully added comment to {issue_id}")
                 return True
             else:
-                error(f"Failed to add comment: {response.status_code} - {response.text[:500]}", "JiraService")
+                error(f"Failed to add comment: {response.status_code} - {response.text[:500]}")
                 return False
         except requests.exceptions.Timeout:
-            error(f"JIRA add_comment timed out for {issue_id}", "JiraService")
+            error(f"JIRA add_comment timed out for {issue_id}")
             return False
         except Exception as e:
-            error(f"Error adding comment to {issue_id}: {e}", "JiraService")
+            error(f"Error adding comment to {issue_id}: {e}")
             return False
     
     def _format_description_to_adf(self, text: str) -> Dict[str, Any]:

@@ -9,7 +9,7 @@ import socket
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 from typing import Dict, Any, Optional, List, Tuple
-from log_config import logger, error
+from log_config import logger, error, info
 
 
 class LocalAppService:
@@ -129,7 +129,7 @@ class LocalAppService:
         Returns:
             Tuple of (success, message, urls_dict)
         """
-        logger.info(f"Starting app locally from {repo_dir}")
+        info(f"Starting app locally from {repo_dir}")
         self.last_startup_diagnostics = {}
         self._backend_startup_logs = []
         self._frontend_startup_logs = []
@@ -144,7 +144,7 @@ class LocalAppService:
             frontend_reserved = set(self._reserved_ports)
             frontend_reserved.add(self.backend_port)
             self.frontend_port = self._find_available_port(3100, reserved_ports=frontend_reserved)
-            logger.info(f"Selected local ports: backend={self.backend_port}, frontend={self.frontend_port}")
+            info(f"Selected local ports: backend={self.backend_port}, frontend={self.frontend_port}")
 
             urls: Dict[str, str] = {}
 
@@ -172,7 +172,7 @@ class LocalAppService:
         
         except Exception as e:
             error_msg = f"Error starting app locally: {str(e)}"
-            error(error_msg, "LocalAppService")
+            error(error_msg)
             # Clean up any processes
             await self._stop_all(job_id)
             self.last_startup_diagnostics['phase'] = 'startup_exception'
@@ -187,7 +187,7 @@ class LocalAppService:
         
         # CRITICAL: Create virtual environment for isolation
         venv_dir = os.path.join(backend_dir, '.venv')
-        logger.info(f"Creating isolated virtual environment at {venv_dir}")
+        info(f"Creating isolated virtual environment at {venv_dir}")
         
         try:
             venv_result = subprocess.run(
@@ -215,7 +215,7 @@ class LocalAppService:
         # Check if requirements.txt exists and install dependencies IN VENV
         requirements_path = os.path.join(backend_dir, 'requirements.txt')
         if os.path.exists(requirements_path):
-            logger.info(f"Installing backend dependencies in isolated venv")
+            info(f"Installing backend dependencies in isolated venv")
             install_result = subprocess.run(
                 [venv_pip, 'install', '-r', 'requirements.txt'],
                 cwd=backend_dir,
@@ -225,12 +225,12 @@ class LocalAppService:
             )
             if install_result.returncode != 0:
                 error_msg = f"Failed to install dependencies: {install_result.stderr[:1000]}"
-                logger.error(f"pip install failed: {install_result.stderr}")
-                logger.error(f"pip stdout: {install_result.stdout}")
+                error(f"pip install failed: {install_result.stderr}")
+                error(f"pip stdout: {install_result.stdout}")
                 return False, error_msg
             
             # Install uvicorn in venv if not already present
-            logger.info(f"Ensuring uvicorn is installed in venv")
+            info(f"Ensuring uvicorn is installed in venv")
             subprocess.run(
                 [venv_pip, 'install', 'uvicorn[standard]'],
                 cwd=backend_dir,
@@ -240,7 +240,7 @@ class LocalAppService:
             )
         
         # Start uvicorn server using venv's uvicorn
-        logger.info(f"Starting backend on port {self.backend_port} (using venv)")
+        info(f"Starting backend on port {self.backend_port} (using venv)")
         try:
             # Start process in background using venv's Python
             self.backend_process = await asyncio.create_subprocess_exec(
@@ -306,8 +306,8 @@ class LocalAppService:
                     return False, f"Backend did not become HTTP-ready. stderr: {tail_msg[:1200]}"
                 return False, "Backend did not become HTTP-ready in time"
             
-            logger.info(f"Backend started successfully on port {self.backend_port}")
-            logger.info(f"Backend startup logs: {startup_logs}")
+            info(f"Backend started successfully on port {self.backend_port}")
+            info(f"Backend startup logs: {startup_logs}")
             self._backend_startup_logs = startup_logs
             return True, "Backend started"
         
@@ -325,7 +325,7 @@ class LocalAppService:
         if not os.path.exists(package_json_path):
             return False, "package.json not found in frontend directory"
         
-        logger.info(f"Installing frontend dependencies from package.json")
+        info(f"Installing frontend dependencies from package.json")
         
         # Use npm ci if package-lock.json exists, otherwise npm install
         npm_cmd = ['npm', 'install']
@@ -346,7 +346,7 @@ class LocalAppService:
         env['PORT'] = str(self.frontend_port)
         
         # Start Next.js dev server
-        logger.info(f"Starting frontend on port {self.frontend_port}")
+        info(f"Starting frontend on port {self.frontend_port}")
         try:
             # Start process in background
             self.frontend_process = await asyncio.create_subprocess_exec(
@@ -377,7 +377,7 @@ class LocalAppService:
                     if line:
                         log_line = line.decode().strip()
                         startup_logs.append(log_line)
-                        logger.info(f"Frontend: {log_line}")
+                        info(f"Frontend: {log_line}")
                         
                         # Check for ready signal
                         line_lower = log_line.lower()
@@ -389,7 +389,7 @@ class LocalAppService:
                         ):
                             ready = True
                             # DRAIN A BIT MORE: Capture trailing logs (like ports) that often follow "Ready"
-                            logger.info("Found ready signal, draining final startup logs...")
+                            info("Found ready signal, draining final startup logs...")
                             for _ in range(5):
                                 try:
                                     extra_line = await asyncio.wait_for(
@@ -399,7 +399,7 @@ class LocalAppService:
                                     if extra_line:
                                         log_line = extra_line.decode().strip()
                                         startup_logs.append(log_line)
-                                        logger.info(f"Frontend (drain): {log_line}")
+                                        info(f"Frontend (drain): {log_line}")
                                 except asyncio.TimeoutError:
                                     break
                             break
@@ -418,7 +418,7 @@ class LocalAppService:
                     if err_line:
                         log_line = err_line.decode().strip()
                         startup_logs.append(log_line)
-                        logger.info(f"Frontend(stderr): {log_line}")
+                        info(f"Frontend(stderr): {log_line}")
 
                         line_lower = log_line.lower()
                         if (
@@ -437,8 +437,8 @@ class LocalAppService:
                 await asyncio.sleep(1)
             
             if ready:
-                logger.info(f"Frontend started successfully on port {self.frontend_port}")
-                logger.info(f"Frontend startup logs: {startup_logs[-5:]}")  # Last 5 lines
+                info(f"Frontend started successfully on port {self.frontend_port}")
+                info(f"Frontend startup logs: {startup_logs[-5:]}")  # Last 5 lines
                 self._frontend_startup_logs = startup_logs
                 return True, "Frontend started"
             else:
@@ -457,28 +457,28 @@ class LocalAppService:
     async def _stop_backend(self, job_id: str):
         """Stop the backend process."""
         if self.backend_process and self.backend_process.returncode is None:
-            logger.info(f"Stopping backend process for job {job_id}")
+            info(f"Stopping backend process for job {job_id}")
             try:
                 self.backend_process.send_signal(signal.SIGTERM)
                 await asyncio.wait_for(self.backend_process.wait(), timeout=10)
             except asyncio.TimeoutError:
-                logger.warning("Backend did not stop gracefully, killing...")
+                warning("Backend did not stop gracefully, killing...")
                 self.backend_process.kill()
             except Exception as e:
-                logger.error(f"Error stopping backend: {e}")
+                error(f"Error stopping backend: {e}")
     
     async def _stop_frontend(self, job_id: str):
         """Stop the frontend process."""
         if self.frontend_process and self.frontend_process.returncode is None:
-            logger.info(f"Stopping frontend process for job {job_id}")
+            info(f"Stopping frontend process for job {job_id}")
             try:
                 self.frontend_process.send_signal(signal.SIGTERM)
                 await asyncio.wait_for(self.frontend_process.wait(), timeout=10)
             except asyncio.TimeoutError:
-                logger.warning("Frontend did not stop gracefully, killing...")
+                warning("Frontend did not stop gracefully, killing...")
                 self.frontend_process.kill()
             except Exception as e:
-                logger.error(f"Error stopping frontend: {e}")
+                error(f"Error stopping frontend: {e}")
     
     async def _stop_all(self, job_id: str):
         """Stop both backend and frontend processes."""
