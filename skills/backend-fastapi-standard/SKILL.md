@@ -33,3 +33,4 @@ Example: `github_repository: https://github.com/my-org/my-backend-service`
 - Keep route handlers thin; business logic belongs in services.
 - Use typed request/response models.
 - Add/update tests for changed service and route behavior.
+- Backend code must stay isolated to the backend repository; do not generate frontend-specific paths or alias imports like `@/`.

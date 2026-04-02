@@ -59,6 +59,9 @@ class CodeExecutionManager:
                     "- You are generating code for the FRONTEND repository root.\n"
                     "- FILE_PATH values MUST be repo-root relative (e.g., app/page.tsx, src/api/client.ts).\n"
                     "- NEVER prefix file paths with 'frontend/'.\n"
+                    "- Use the Next.js alias '@/...' only for files inside 'src/'.\n"
+                    "- If you import from '@/components/', '@/store/', '@/api/', or '@/types/', generate the referenced file in the same response if it does not already exist.\n"
+                    "- Use .tsx for UI components and .ts for stores, API helpers, and type definitions.\n"
                 )
             else:
                 code_context += (

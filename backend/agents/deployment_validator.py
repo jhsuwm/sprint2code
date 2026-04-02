@@ -660,7 +660,13 @@ class DeploymentValidator:
                                         target_content = tf.read()
                                         for alias in node.names:
                                             if alias.name == '*' or f"{node.module}.{alias.name}" in module_to_file: continue
-                                            if not re.search(rf"(class|def)\s+{alias.name}\b|{alias.name}\s*=", target_content):
+                                            # Match: `NAME = ...`, `NAME: Type = ...` (Pydantic/dataclass),
+                                            # `NAME: Type` (annotation-only), `class NAME`, `def NAME`
+                                            if not re.search(
+                                                rf"(class|def)\s+{alias.name}\b"
+                                                rf"|{alias.name}\s*[=:]",
+                                                target_content
+                                            ):
                                                 errors.append(f"ImportError in '{module_name}.py': '{alias.name}' not found in '{node.module}.py'")
                                 elif module_is_package:
                                     # Package import (e.g. "from routes import auth_routes"):
