@@ -2368,6 +2368,15 @@ class DeploymentFixer:
         if file_path.endswith(('.ts', '.tsx')) and any(("is not assignable to parameter of type" in err) or ("Type '" in err and "' is not assignable to type '" in err) for err in missing_items):
             # Potential type mismatch due to redundant definitions
             return True
+        # NEW: Axios interceptor type mismatch (AxiosRequestConfig vs InternalAxiosRequestConfig)
+        if file_path.endswith(('.ts', '.tsx')) and any(
+            'AxiosRequestConfig' in err and 'InternalAxiosRequestConfig' in err
+            for err in missing_items
+        ):
+            return True
+        # NEW: Missing CSS/asset files
+        if any('AssetError' in err and 'CSS file' in err for err in missing_items):
+            return True
         return False
     
     async def _apply_programmatic_fix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
@@ -2455,6 +2464,15 @@ class DeploymentFixer:
                 for err in file_info.get('missing', [])
             ):
                 return await self.frontend_fixer._fix_ts_missing_type_property(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # NEW: Axios interceptor type mismatch fix
+            elif file_path.endswith(('.ts', '.tsx')) and any(
+                'AxiosRequestConfig' in str(err) and 'InternalAxiosRequestConfig' in str(err)
+                for err in file_info.get('missing', [])
+            ):
+                return await self.frontend_fixer._fix_axios_interceptor_type(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # NEW: Missing CSS file fix
+            elif file_path.endswith(('.ts', '.tsx', '.js', '.jsx')) and any('AssetError' in str(err) and 'CSS file' in str(err) for err in file_info.get('missing', [])):
+                return await self.frontend_fixer._fix_missing_css_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif '/types/' in file_path and file_path.endswith('.ts'):
                 return await self.frontend_fixer._fix_type_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for "from backend.X" errors

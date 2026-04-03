@@ -825,6 +825,143 @@ class FrontendFixer:
 
         return False
 
+    async def _fix_missing_css_file(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Create missing CSS files with basic boilerplate content"""
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        
+        # Extract the CSS file path from AssetError
+        css_file_path = None
+        for err in missing_items:
+            match = re.search(r"AssetError in '[^']+': CSS file '([^']+)' not found", err)
+            if match:
+                css_file_path = match.group(1)
+                break
+        
+        if not css_file_path:
+            return False
+        
+        # Resolve CSS file location
+        local = os.path.join(repo_dir, file_path)
+        if not os.path.exists(local):
+            return False
+        
+        # Calculate the CSS file's absolute path relative to the importing file
+        if css_file_path.startswith('./') or css_file_path.startswith('../'):
+            css_absolute = os.path.normpath(os.path.join(os.path.dirname(local), css_file_path))
+        elif css_file_path.startswith('@/'):
+            frontend_dir = os.path.dirname(local)
+            while frontend_dir != repo_dir and not os.path.exists(os.path.join(frontend_dir, 'package.json')):
+                frontend_dir = os.path.dirname(frontend_dir)
+            css_absolute = os.path.join(frontend_dir, 'src', css_file_path[2:])
+            # Fallback for app/ directory structure
+            if not os.path.dirname(css_absolute).startswith(os.path.join(frontend_dir, 'src')):
+                css_absolute = os.path.join(frontend_dir, 'app', css_file_path[2:])
+        else:
+            css_absolute = os.path.normpath(os.path.join(os.path.dirname(local), css_file_path))
+        
+        # Create the CSS file with appropriate boilerplate
+        css_filename = os.path.basename(css_file_path)
+        if css_filename in ('globals.css', 'global.css'):
+            content = (
+                "@tailwind base;\n"
+                "@tailwind components;\n"
+                "@tailwind utilities;\n\n"
+                "/* Global styles */\n"
+                "* {\n"
+                "  box-sizing: border-box;\n"
+                "  padding: 0;\n"
+                "  margin: 0;\n"
+                "}\n\n"
+                "html,\n"
+                "body {\n"
+                "  max-width: 100vw;\n"
+                "  overflow-x: hidden;\n"
+                "}\n"
+            )
+        elif '.module.css' in css_filename:
+            content = (
+                "/* CSS Module */\n"
+                ".container {\n"
+                "  padding: 1rem;\n"
+                "}\n"
+            )
+        else:
+            content = (
+                "/* Auto-generated CSS file */\n"
+                "/* Add your styles here */\n"
+            )
+        
+        # Create directory if needed
+        os.makedirs(os.path.dirname(css_absolute), exist_ok=True)
+        
+        # Write the CSS file
+        with open(css_absolute, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        # Get repo-relative path for commit
+        css_repo_path = os.path.relpath(css_absolute, repo_dir).replace(os.path.sep, '/')
+        
+        self.fixer._safe_log(
+            job_id,
+            f"✅ Created missing CSS file: {css_repo_path}",
+            "Programmatic CSS Fix"
+        )
+        
+        return await self.fixer._commit_programmatic_fix(job_id, css_repo_path, content, github_repo, github_branch)
+
+    async def _fix_axios_interceptor_type(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix Axios interceptor type mismatch - use InternalAxiosRequestConfig instead of AxiosRequestConfig."""
+        if not file_path.endswith(('.ts', '.tsx')):
+            return False
+        
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content') or ''
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+        
+        # Check if this file has Axios interceptor issues
+        missing_errors = [str(err) for err in file_info.get('missing', [])]
+        has_interceptor_type_issue = any(
+            'AxiosRequestConfig' in err and 'InternalAxiosRequestConfig' in err 
+            for err in missing_errors
+        )
+        
+        if not has_interceptor_type_issue:
+            return False
+        
+        original = content
+        
+        # Fix import: Add InternalAxiosRequestConfig to imports if not present
+        if 'InternalAxiosRequestConfig' not in content and 'from \'axios\'' in content:
+            content = re.sub(
+                r"import\s+(axios,\s*)?\{([^}]+)\}\s+from\s+['\"]axios['\"];?",
+                lambda m: f"import {m.group(1) or ''}{{ {m.group(2).strip()}, InternalAxiosRequestConfig }} from 'axios';",
+                content
+            )
+        
+        # Replace AxiosRequestConfig with InternalAxiosRequestConfig in interceptor signatures
+        content = re.sub(
+            r"\(config:\s*AxiosRequestConfig\)\s*=>",
+            r"(config: InternalAxiosRequestConfig) =>",
+            content
+        )
+        
+        if content == original:
+            return False
+        
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        self.fixer._safe_log(
+            job_id,
+            f"✅ Fixed Axios interceptor type (AxiosRequestConfig → InternalAxiosRequestConfig) in {file_path}",
+            "Programmatic Axios Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     async def _fix_frontend_alias_src_prefix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         """Fix alias imports like '@/src/...' or 'src/...' to '@/...'."""
         local = os.path.join(repo_dir, file_path)
