@@ -81,15 +81,36 @@ class DeploymentManager:
             os.makedirs(temp_dir, exist_ok=True)
 
             try:
-                if len(modified_repos) > 1:
-                    self.job_manager.log(job_id, f"Preparing multi-repo deployment for: {', '.join(modified_repos)}", "Deployment")
-                    repo_dir = temp_dir # Build context is the parent directory
-                    for repo_str in modified_repos:
-                        # Identify type (frontend/backend) to determine target directory
-                        repo_info = next((r for r in all_repos_info if f"{r['owner']}/{r['repo']}" == repo_str), None)
-                        repo_type = repo_info.get("type", "unknown") if repo_info else "unknown"
-                        
-                        target = "backend" if "backend" in repo_type.lower() else ("frontend" if "frontend" in repo_type.lower() else repo_str.split('/')[-1])
+                # Determine which repos to clone for local start. If the project is split
+                # across backend/frontend repos, we need BOTH even if only one was modified.
+                repos_to_clone = []
+                if all_repos_info:
+                    repos_to_clone = [f"{r['owner']}/{r['repo']}" for r in all_repos_info if r.get('owner') and r.get('repo')]
+                if not repos_to_clone:
+                    repos_to_clone = list(modified_repos) if modified_repos else [github_repo]
+
+                # Multi-repo if we have more than one repo OR explicit frontend/backend types.
+                repo_type_map = {
+                    f"{r['owner']}/{r['repo']}": (r.get("type") or "unknown")
+                    for r in all_repos_info
+                    if r.get('owner') and r.get('repo')
+                }
+                is_multi_repo = len(repos_to_clone) > 1 or any(
+                    t for t in repo_type_map.values()
+                    if "frontend" in t.lower() or "backend" in t.lower()
+                )
+
+                if is_multi_repo:
+                    self.job_manager.log(job_id, f"Preparing multi-repo deployment for: {', '.join(repos_to_clone)}", "Deployment")
+                    repo_dir = temp_dir  # Build context is the parent directory
+                    for repo_str in repos_to_clone:
+                        repo_type = repo_type_map.get(repo_str, "unknown")
+                        repo_name = repo_str.split('/')[-1].lower()
+                        target = (
+                            "backend" if "backend" in repo_type.lower() or "backend" in repo_name
+                            else ("frontend" if "frontend" in repo_type.lower() or "frontend" in repo_name
+                                  else repo_str.split('/')[-1])
+                        )
                         self._clone_repo(temp_dir, repo_str, github_branch, target_subdir=target)
                 else:
                     # Single repo case (standard fullstack repo structure or primary only)
@@ -1116,6 +1137,30 @@ class DeploymentManager:
             errors.append(
                 f"RuntimeNameError in '{target_file}': name '{missing_name}' is not defined"
             )
+
+        # Pydantic Settings validation errors (missing env vars) during startup.
+        # Example:
+        # pydantic_core._pydantic_core.ValidationError: 2 validation errors for Settings
+        # FIRESTORE_PROJECT_ID
+        #   Field required [type=missing, ...]
+        if re.search(r"validation errors for Settings", combined, re.IGNORECASE) or re.search(r"ValidationError", combined):
+            missing_fields = re.findall(
+                r"^([A-Z_][A-Z0-9_]*)\s*\n\s*Field required",
+                combined,
+                re.MULTILINE
+            )
+            if missing_fields:
+                # Best-effort locate the settings file from traceback.
+                settings_file = "config.py"
+                tb_file = re.search(r'File "([^"]+/(?:config|settings)\.py)"', combined)
+                if tb_file:
+                    settings_file = tb_file.group(1).replace("\\", "/")
+                    if "/backend/" in settings_file:
+                        settings_file = settings_file.rsplit("/backend/", 1)[1]
+                fields_csv = ", ".join(sorted(set(missing_fields)))
+                errors.append(
+                    f"PydanticSettingsError in '{settings_file}': Missing required settings: {fields_csv}"
+                )
 
         return errors
 

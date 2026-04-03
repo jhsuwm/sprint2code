@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Optional
 import re
+import os
 from log_config import logger, error
 from agents.job_manager import job_store
 from agents.skill_registry import SkillRegistry
@@ -70,6 +71,14 @@ class RequirementsManager:
         
         if technical_config:
             work_plan_context += self._build_skill_requirements_context(technical_config)
+
+        prd_requirements = self._extract_prd_requirements(clean_prd)
+        if prd_requirements:
+            work_plan_context += (
+                "PRD REQUIREMENTS (MUST be covered by subtasks):\n- "
+                + "\n- ".join(prd_requirements)
+                + "\n\n"
+            )
         
         work_plan = await self.ai_service.generate_work_plan(work_plan_context)
         job_store[job_id]["work_plan"] = work_plan
@@ -87,19 +96,21 @@ class RequirementsManager:
         
         # Subtasks
         parsed_subtasks = self.ai_service.parse_work_plan(work_plan)
-        min_subtasks = self._determine_min_subtasks(clean_prd, technical_config)
+        min_subtasks = self._determine_min_subtasks(clean_prd, technical_config, job_id=job_id)
         missing_coverage = self._detect_missing_skill_coverage(parsed_subtasks, technical_config)
+        domain_deficit = self._get_domain_deficit(parsed_subtasks, technical_config, clean_prd, job_id=job_id)
 
         # Recovery path: if model produced too few subtasks, retry and enforce the minimum.
-        if len(parsed_subtasks) < min_subtasks or missing_coverage:
+        if len(parsed_subtasks) < min_subtasks or missing_coverage or domain_deficit:
             max_regeneration_attempts = 2
             best_work_plan = work_plan
             best_subtasks = parsed_subtasks
             best_missing_coverage = missing_coverage
+            best_domain_deficit = domain_deficit
 
             for attempt in range(1, max_regeneration_attempts + 1):
-                if best_missing_coverage:
-                    missing_labels = ", ".join(best_missing_coverage)
+                if best_missing_coverage or best_domain_deficit:
+                    missing_labels = ", ".join(best_missing_coverage + best_domain_deficit)
                     recovery_reason = (
                         f"⚠️ Work plan missing coverage for selected skill domains: {missing_labels}. "
                         f"Regenerating expanded work plan (attempt {attempt}/{max_regeneration_attempts})."
@@ -123,6 +134,7 @@ class RequirementsManager:
                     f"  Desc: <implementation details>\n"
                     f"  ---\n"
                     f"- Cover backend and frontend completely when both skills are present.\n"
+                    f"- Ensure EVERY PRD REQUIREMENT is covered by at least one subtask.\n"
                     f"- Keep each subtask focused and implementation-ready.\n"
                     f"- Avoid combining the full implementation into one broad subtask.\n"
                 )
@@ -131,27 +143,37 @@ class RequirementsManager:
                         "- Mandatory skill coverage:\n"
                         + "".join([f"  - Include explicit subtasks for: {domain}.\n" for domain in best_missing_coverage])
                     )
+                if best_domain_deficit:
+                    expansion_instruction += (
+                        "- Mandatory minimum subtask counts:\n"
+                        + "".join([f"  - Ensure at least {label}.\n" for label in best_domain_deficit])
+                    )
                 candidate_work_plan = await self.ai_service.generate_work_plan(work_plan_context + expansion_instruction)
                 candidate_subtasks = self.ai_service.parse_work_plan(candidate_work_plan)
                 candidate_missing_coverage = self._detect_missing_skill_coverage(candidate_subtasks, technical_config)
+                candidate_domain_deficit = self._get_domain_deficit(candidate_subtasks, technical_config, clean_prd, job_id=job_id)
 
                 candidate_is_better = False
                 if len(candidate_missing_coverage) < len(best_missing_coverage):
                     candidate_is_better = True
                 elif len(candidate_missing_coverage) == len(best_missing_coverage) and len(candidate_subtasks) > len(best_subtasks):
                     candidate_is_better = True
+                elif len(candidate_domain_deficit) < len(best_domain_deficit):
+                    candidate_is_better = True
 
                 if candidate_is_better:
                     best_work_plan = candidate_work_plan
                     best_subtasks = candidate_subtasks
                     best_missing_coverage = candidate_missing_coverage
+                    best_domain_deficit = candidate_domain_deficit
 
-                if len(best_subtasks) >= min_subtasks and not best_missing_coverage:
+                if len(best_subtasks) >= min_subtasks and not best_missing_coverage and not best_domain_deficit:
                     break
 
             work_plan = best_work_plan
             parsed_subtasks = best_subtasks
             missing_coverage = best_missing_coverage
+            domain_deficit = best_domain_deficit
             job_store[job_id]["work_plan"] = work_plan
 
         # Deterministic fallback: never abort solely because AI under-scoped the plan.
@@ -174,6 +196,28 @@ class RequirementsManager:
                 f"Fallback planner produced {len(parsed_subtasks)} subtasks; remaining missing coverage: {missing_coverage or 'none'}",
                 "Work Plan Fallback",
             )
+
+        # Hard guarantee: ensure frontend/backend subtasks exist when those skills are selected.
+        parsed_subtasks = self._ensure_skill_coverage_subtasks(parsed_subtasks, technical_config, clean_prd)
+        missing_coverage = self._detect_missing_skill_coverage(parsed_subtasks, technical_config)
+        domain_deficit = self._get_domain_deficit(parsed_subtasks, technical_config, clean_prd, job_id=job_id)
+        # Hard guardrail: require minimum frontend/backend subtask counts before JIRA creation.
+        if domain_deficit:
+            # Retry once more with an explicit requirement before aborting.
+            recovery_hint = (
+                "\n\nCRITICAL OUTPUT REQUIREMENT:\n"
+                "- Add explicit frontend and backend subtasks to meet required minimum counts.\n"
+                "- Ensure EVERY PRD REQUIREMENT is covered by at least one subtask.\n"
+                + "".join([f"- Ensure at least {label}.\n" for label in domain_deficit])
+            )
+            candidate_work_plan = await self.ai_service.generate_work_plan(work_plan_context + recovery_hint)
+            candidate_subtasks = self.ai_service.parse_work_plan(candidate_work_plan)
+            if candidate_subtasks:
+                parsed_subtasks = candidate_subtasks
+                missing_coverage = self._detect_missing_skill_coverage(parsed_subtasks, technical_config)
+                domain_deficit = self._get_domain_deficit(parsed_subtasks, technical_config, clean_prd, job_id=job_id)
+                job_store[job_id]["work_plan"] = candidate_work_plan
+        self._assert_min_domain_subtasks(job_id, parsed_subtasks, technical_config, clean_prd)
 
         # CRITICAL: Reject under-scoped plans to prevent incomplete code generation.
         if len(parsed_subtasks) < min_subtasks:
@@ -384,16 +428,44 @@ class RequirementsManager:
         mimes = {'log':'text/plain', 'txt':'text/plain', 'png':'image/png', 'jpg':'image/jpeg', 'pdf':'application/pdf'}
         return mimes.get(ext, 'application/octet-stream')
 
-    def _determine_min_subtasks(self, clean_prd: str, technical_config: Dict[str, Any]) -> int:
+    def _determine_min_subtasks(self, clean_prd: str, technical_config: Dict[str, Any], job_id: Optional[str] = None) -> int:
         """Set a practical lower bound to avoid under-scoped plans."""
         has_frontend = bool((technical_config or {}).get("frontend"))
         has_backend = bool((technical_config or {}).get("backend"))
         is_fullstack = has_frontend and has_backend
         # Longer PRDs need more decomposition; keep floor conservative.
         prd_len = len(clean_prd or "")
-        if is_fullstack:
-            return 8 if prd_len > 600 else 6
-        return 5 if prd_len > 600 else 4
+        base = 8 if prd_len > 600 else 6
+        if not is_fullstack:
+            base = 6 if prd_len > 600 else 4
+
+        # Allow UI override to set hard minimums (no hidden scaling when overrides are present).
+        override_backend = None
+        override_frontend = None
+        if job_id and job_id in job_store:
+            override_backend = job_store[job_id].get("min_backend_subtasks")
+            override_frontend = job_store[job_id].get("min_frontend_subtasks")
+
+        # If UI overrides exist, compute total minimum directly from them (or env defaults).
+        if is_fullstack and (override_backend is not None or override_frontend is not None):
+            backend_min = int(override_backend) if override_backend is not None else int(os.getenv("BACKEND_MIN_SUBTASKS", "4"))
+            frontend_min = int(override_frontend) if override_frontend is not None else int(os.getenv("FRONTEND_MIN_SUBTASKS", "3"))
+            return backend_min + frontend_min
+
+        if not is_fullstack and (override_backend is not None or override_frontend is not None):
+            if has_backend:
+                return int(override_backend) if override_backend is not None else int(os.getenv("BACKEND_MIN_SUBTASKS", "4"))
+            if has_frontend:
+                return int(override_frontend) if override_frontend is not None else int(os.getenv("FRONTEND_MIN_SUBTASKS", "3"))
+
+        req_count = len(self._extract_prd_requirements(clean_prd))
+        if req_count:
+            if is_fullstack:
+                base = max(base, min(18, 4 + req_count))
+            else:
+                base = max(base, min(12, 3 + req_count))
+
+        return base
 
     def _build_skill_requirements_context(self, technical_config: Dict[str, Any]) -> str:
         """Build explicit skill-driven planning instructions for work-plan generation."""
@@ -462,16 +534,19 @@ class RequirementsManager:
         plan_text = " ".join(
             [f"{st.get('summary', '')} {st.get('description', '')}".lower() for st in (parsed_subtasks or [])]
         )
+        summary_text = " ".join([st.get("summary", "").lower() for st in (parsed_subtasks or [])])
 
         missing: List[str] = []
         if technical_config.get("backend"):
             backend_keywords = ["backend", "fastapi", "api", "route", "service", "model", "database", "python"]
-            if not any(keyword in plan_text for keyword in backend_keywords):
+            summary_has_backend = any(keyword in summary_text for keyword in backend_keywords)
+            if not summary_has_backend and not any(keyword in plan_text for keyword in backend_keywords):
                 missing.append("backend")
 
         if technical_config.get("frontend"):
             frontend_keywords = ["frontend", "next.js", "nextjs", "react", "ui", "component", "page", "typescript"]
-            if not any(keyword in plan_text for keyword in frontend_keywords):
+            summary_has_frontend = any(keyword in summary_text for keyword in frontend_keywords)
+            if not summary_has_frontend and not any(keyword in plan_text for keyword in frontend_keywords):
                 missing.append("frontend")
 
         if technical_config.get("full"):
@@ -498,6 +573,152 @@ class RequirementsManager:
             if len(areas) >= max_items:
                 break
         return areas
+
+    def _extract_prd_requirements(self, clean_prd: str) -> List[str]:
+        """Extract PRD requirement lines (bullets/numbered) for stricter subtask coverage."""
+        if not clean_prd:
+            return []
+        reqs: List[str] = []
+        lines = [ln.strip() for ln in clean_prd.splitlines() if ln.strip()]
+        for line in lines:
+            normalized = re.sub(r"^\s*(?:[-*]|\d+[.)])\s*", "", line).strip()
+            if len(normalized) < 10:
+                continue
+            lowered = normalized.lower()
+            if any(marker in lowered for marker in ("shall", "must", "should", "require", "provide", "allow")):
+                reqs.append(normalized)
+        return reqs[:20]
+
+    def _count_prd_domain_requirements(self, clean_prd: str, keywords: List[str]) -> int:
+        """Count PRD requirement lines that mention any of the given keywords."""
+        reqs = self._extract_prd_requirements(clean_prd)
+        if not reqs:
+            return 0
+        lowered_keywords = [k.lower() for k in keywords]
+        count = 0
+        for req in reqs:
+            lowered = req.lower()
+            if any(k in lowered for k in lowered_keywords):
+                count += 1
+        return count
+
+    def _has_domain_subtask(self, subtasks: List[Dict[str, str]], keywords: List[str]) -> bool:
+        """Return True if any subtask summary/description contains any keyword."""
+        if not subtasks:
+            return False
+        lowered_keywords = [k.lower() for k in keywords]
+        for st in subtasks:
+            summary = (st.get("summary", "") or "").lower()
+            desc = (st.get("description", "") or "").lower()
+            if any(k in summary for k in lowered_keywords):
+                return True
+            if any(k in desc for k in lowered_keywords):
+                return True
+        return False
+
+    def _count_domain_subtasks(self, subtasks: List[Dict[str, str]], keywords: List[str]) -> int:
+        if not subtasks:
+            return 0
+        lowered_keywords = [k.lower() for k in keywords]
+        count = 0
+        for st in subtasks:
+            summary = (st.get("summary", "") or "").lower()
+            desc = (st.get("description", "") or "").lower()
+            if any(k in summary for k in lowered_keywords) or any(k in desc for k in lowered_keywords):
+                count += 1
+        return count
+
+    def _get_domain_deficit(self, subtasks: List[Dict[str, str]], technical_config: Dict[str, Any], clean_prd: str, job_id: Optional[str] = None) -> List[str]:
+        """Return deficit labels when required frontend/backend subtask counts are not met."""
+        if not technical_config:
+            return []
+        backend_keywords = ["backend", "fastapi", "api", "service", "database", "model", "python"]
+        frontend_keywords = ["frontend", "next.js", "nextjs", "react", "ui", "component", "page", "typescript"]
+
+        override_backend = None
+        override_frontend = None
+        if job_id and job_id in job_store:
+            override_backend = job_store[job_id].get("min_backend_subtasks")
+            override_frontend = job_store[job_id].get("min_frontend_subtasks")
+
+        min_backend = int(override_backend) if override_backend is not None else int(os.getenv("BACKEND_MIN_SUBTASKS", "4"))
+        min_frontend = int(override_frontend) if override_frontend is not None else int(os.getenv("FRONTEND_MIN_SUBTASKS", "3"))
+        strict_backend = str(os.getenv("BACKEND_MIN_SUBTASKS_STRICT", "false")).lower() in ("1", "true", "yes")
+        strict_frontend = str(os.getenv("FRONTEND_MIN_SUBTASKS_STRICT", "false")).lower() in ("1", "true", "yes")
+        # Scale minimums with PRD requirement counts for each domain (unless strict override is enabled).
+        backend_req = self._count_prd_domain_requirements(clean_prd, backend_keywords)
+        frontend_req = self._count_prd_domain_requirements(clean_prd, frontend_keywords)
+        if backend_req and not strict_backend and override_backend is None:
+            min_backend = max(min_backend, min(8, (backend_req + 1) // 2 + 1))
+        if frontend_req and not strict_frontend and override_frontend is None:
+            min_frontend = max(min_frontend, min(8, (frontend_req + 1) // 2 + 1))
+
+        has_backend = bool(technical_config.get("backend"))
+        has_frontend = bool(technical_config.get("frontend"))
+
+        backend_count = self._count_domain_subtasks(subtasks, backend_keywords) if has_backend else 0
+        frontend_count = self._count_domain_subtasks(subtasks, frontend_keywords) if has_frontend else 0
+
+        missing_labels: List[str] = []
+        if has_backend and backend_count < min_backend:
+            missing_labels.append(f"backend ({backend_count}/{min_backend})")
+        if has_frontend and frontend_count < min_frontend:
+            missing_labels.append(f"frontend ({frontend_count}/{min_frontend})")
+
+        return missing_labels
+
+    def _assert_min_domain_subtasks(self, job_id: str, subtasks: List[Dict[str, str]], technical_config: Dict[str, Any], clean_prd: str) -> None:
+        """Abort when required frontend/backend subtask counts are not met."""
+        missing_labels = self._get_domain_deficit(subtasks, technical_config, clean_prd, job_id=job_id)
+        if not missing_labels:
+            return
+        error_msg = (
+            "🚫 PIPELINE ABORTED: Work plan does not include enough required subtasks: "
+            + ", ".join(missing_labels)
+            + ". Please regenerate the work plan to include full backend and frontend coverage."
+        )
+        self.job_manager.log(job_id, error_msg, "Insufficient Domain Subtasks", level="ERROR")
+        error(error_msg)
+        raise Exception(error_msg)
+
+    def _ensure_skill_coverage_subtasks(
+        self, subtasks: List[Dict[str, str]], technical_config: Dict[str, Any], clean_prd: str
+    ) -> List[Dict[str, str]]:
+        """Guarantee at least one backend/frontend subtask when those skills are selected."""
+        if not technical_config:
+            return subtasks
+
+        has_backend = bool(technical_config.get("backend"))
+        has_frontend = bool(technical_config.get("frontend"))
+        focus_areas = self._extract_prd_focus_areas(clean_prd or "")
+        focus_text = "; ".join(focus_areas[:2]) if focus_areas else "core user journeys and required product flows"
+
+        backend_keywords = ["backend", "fastapi", "api", "service", "database", "model", "python"]
+        frontend_keywords = ["frontend", "next.js", "nextjs", "react", "ui", "component", "page", "typescript"]
+
+        merged = list(subtasks or [])
+        seen = {(s.get("summary", "").strip().lower(), s.get("description", "").strip().lower()) for s in merged}
+
+        def add(summary: str, description: str) -> None:
+            key = (summary.strip().lower(), description.strip().lower())
+            if not summary.strip() or not description.strip() or key in seen:
+                return
+            seen.add(key)
+            merged.append({"summary": summary.strip(), "description": description.strip()})
+
+        if has_backend and not self._has_domain_subtask(merged, backend_keywords):
+            add(
+                "Backend API foundations",
+                f"Implement backend API routes, services, and models for: {focus_text}.",
+            )
+
+        if has_frontend and not self._has_domain_subtask(merged, frontend_keywords):
+            add(
+                "Frontend UI foundations",
+                f"Build Next.js pages/components and UI flows for: {focus_text}.",
+            )
+
+        return merged
 
     def _build_fallback_subtasks(
         self,

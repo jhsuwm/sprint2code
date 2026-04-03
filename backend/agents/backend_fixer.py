@@ -389,8 +389,13 @@ class BackendFixer:
 
         missing_names = set()
         for err in file_info.get('missing', []):
-            for match in re.findall(r"'([A-Za-z_][A-Za-z0-9_]*)'", str(err)):
+            err_str = str(err)
+            for match in re.findall(r"'([A-Za-z_][A-Za-z0-9_]*)'", err_str):
                 missing_names.add(match)
+            # Handle unquoted missing export markers (e.g., "Missing export: decode_jwt")
+            m = re.search(r"Missing export:\s*([A-Za-z_][A-Za-z0-9_]*)", err_str)
+            if m:
+                missing_names.add(m.group(1))
 
         if not missing_names:
             return False
@@ -427,6 +432,14 @@ class BackendFixer:
                 '\ndef decode_token(token: str):\n'
                 '    """Auto-generated stub: replace with real JWT decoding."""\n'
                 '    return {}\n'
+            ),
+            'decode_jwt': (
+                '\ndef decode_jwt(token: str):\n'
+                '    """Auto-generated shim: keep compatibility with decode_token."""\n'
+                '    try:\n'
+                '        return decode_token(token)\n'
+                '    except Exception:\n'
+                '        return {}\n'
             ),
             'get_db': (
                 '\nasync def get_db():\n'
@@ -520,6 +533,109 @@ class BackendFixer:
             job_id,
             f"✅ Added missing Python exports {stubs_added} to {file_path}",
             "Programmatic Export Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_pydantic_settings_missing(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        missing_fields = set()
+        for err in file_info.get('missing', []):
+            err_str = str(err)
+            m = re.search(r"Missing settings:\s*(.+)", err_str)
+            if m:
+                fields = [f.strip() for f in m.group(1).split(',') if f.strip()]
+                missing_fields.update(fields)
+        if not missing_fields:
+            return False
+
+        def _default_for(name: str, type_hint: str) -> str:
+            name_l = name.lower()
+            hint_l = (type_hint or "").lower()
+            if "optional" in hint_l or "none" in hint_l:
+                return "None"
+            if "bool" in hint_l:
+                return "False"
+            if "int" in hint_l:
+                return "0"
+            if "float" in hint_l:
+                return "0.0"
+            if "secret" in name_l or "token" in name_l or "key" in name_l:
+                return "\"dev-secret\""
+            if "project" in name_l and "id" in name_l:
+                return "\"local-project\""
+            if "url" in name_l:
+                return "\"http://localhost\""
+            return f"\"{name_l}-default\""
+
+        def _find_type_hint(name: str, src: str) -> str:
+            m = re.search(rf"^\s*{re.escape(name)}\s*:\s*([^=\n]+)", src, re.MULTILINE)
+            return m.group(1).strip() if m else ""
+
+        original = content
+        for name in sorted(missing_fields):
+            type_hint = _find_type_hint(name, content)
+            default_value = _default_for(name, type_hint)
+
+            # Replace Field(... ) with Field(default, ...)
+            field_pattern = re.compile(
+                rf"({re.escape(name)}\s*:\s*[^=\n]+=\s*Field\()\s*\.{{3}}\s*([,)])",
+                re.MULTILINE
+            )
+            content, field_subs = field_pattern.subn(
+                rf"\\1{default_value}\\2",
+                content,
+                count=1
+            )
+            if field_subs > 0:
+                continue
+
+            # If Field(...) exists but uses '...' on next line, try a DOTALL fallback.
+            field_pattern_multiline = re.compile(
+                rf"({re.escape(name)}\s*:\s*[^=\n]+=\s*Field\()\s*\.{{3}}\s*([,)])",
+                re.MULTILINE | re.DOTALL
+            )
+            content, field_subs = field_pattern_multiline.subn(
+                rf"\\1{default_value}\\2",
+                content,
+                count=1
+            )
+            if field_subs > 0:
+                continue
+
+            # No Field(...) usage; add default to annotation-only line.
+            annot_pattern = re.compile(rf"^(\s*{re.escape(name)}\s*:\s*[^=\n]+)$", re.MULTILINE)
+            content, annot_subs = annot_pattern.subn(rf"\\1 = {default_value}", content, count=1)
+            if annot_subs > 0:
+                continue
+
+        if content == original:
+            return False
+
+        try:
+            compile(content, local, 'exec')
+        except SyntaxError as e:
+            self.fixer._safe_log(
+                job_id,
+                f"❌ Rejected settings default fix for {file_path}: line {e.lineno} ({e.msg})",
+                "Pydantic Settings Fix",
+                level="WARNING"
+            )
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self.fixer._safe_log(
+            job_id,
+            f"✅ Added defaults for missing settings {sorted(missing_fields)} in {file_path}",
+            "Pydantic Settings Fix"
         )
         return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
 

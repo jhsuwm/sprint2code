@@ -261,7 +261,13 @@ class LocalAppService:
                 stdout = await self.backend_process.stdout.read()
                 stderr = await self.backend_process.stderr.read()
                 crash_output = stderr.decode(errors='replace') or stdout.decode(errors='replace')
-                return False, f"Backend crashed immediately: {crash_output[:1200]}"
+                if len(crash_output) > 1200:
+                    crash_output = (
+                        crash_output[:400]
+                        + "\n...<truncated>...\n"
+                        + crash_output[-800:]
+                    )
+                return False, f"Backend crashed immediately: {crash_output}"
             
             # Try to read some startup logs
             startup_logs = []
@@ -494,6 +500,12 @@ class LocalAppService:
         process = self.backend_process if service_type == 'backend' else self.frontend_process
 
         if not process:
+            startup_logs = (
+                self._backend_startup_logs if service_type == 'backend'
+                else self._frontend_startup_logs
+            )
+            if startup_logs:
+                return [f"[STARTUP] {line}" for line in startup_logs if line]
             return [f"{service_type.title()} process not found"]
 
         logs = []

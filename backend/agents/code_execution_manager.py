@@ -171,6 +171,33 @@ class CodeExecutionManager:
                 log_adf = self.job_manager.format_subtask_execution_log(subtask_key, summary, job_id, parsed_files, status_updated, current_repo_dict, github_branch, committed, failed)
                 self.jira_service.add_comment(subtask_id, log_adf)
 
+        # Guardrail: ensure frontend commits exist when frontend skill is selected.
+        technical_config = job_store[job_id].get("technical_config", {})
+        all_repos = job_store[job_id].get("all_repos", [])
+        modified_repos = job_store[job_id].get("modified_repos", [])
+        backend_repo = next((r for r in all_repos if (r.get("type") or "").lower() == "backend"), None)
+        frontend_repo = next((r for r in all_repos if (r.get("type") or "").lower() == "frontend"), None)
+        if technical_config and technical_config.get("backend") and backend_repo:
+            backend_repo_str = f"{backend_repo['owner']}/{backend_repo['repo']}"
+            if backend_repo_str not in modified_repos:
+                error_msg = (
+                    "🚫 PIPELINE ABORTED: Backend skill is selected, but no backend commits were made. "
+                    "This indicates missing backend subtasks or misrouted file commits. "
+                    "Please regenerate subtasks to include explicit backend work."
+                )
+                self.job_manager.log(job_id, error_msg, "Backend Commit Guard", level="ERROR")
+                raise Exception(error_msg)
+        if technical_config and technical_config.get("frontend") and frontend_repo:
+            frontend_repo_str = f"{frontend_repo['owner']}/{frontend_repo['repo']}"
+            if frontend_repo_str not in modified_repos:
+                error_msg = (
+                    "🚫 PIPELINE ABORTED: Frontend skill is selected, but no frontend commits were made. "
+                    "This indicates missing frontend subtasks or misrouted file commits. "
+                    "Please regenerate subtasks to include explicit frontend work."
+                )
+                self.job_manager.log(job_id, error_msg, "Frontend Commit Guard", level="ERROR")
+                raise Exception(error_msg)
+
     async def _generate_code_with_retry(self, job_id, subtask_key, desc, code_context, clean_prd, attachments, repo_files=None):
         max_retries = 10; retry_count = 0
         while retry_count < max_retries:

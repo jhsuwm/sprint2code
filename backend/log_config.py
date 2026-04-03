@@ -1,5 +1,5 @@
 """
-Centralized logging configuration for the ROOSTER API
+Centralized logging configuration for the Sprint2Code API
 Provides consistent timestamp formatting across all backend components
 ENHANCED: Now includes user_id and session_id support for cost reporting
 ENHANCED: Now automatically captures module and function names from caller
@@ -175,7 +175,7 @@ setup_logging()
 
 # Create a centralized logger instance that the entire codebase can use
 # This will be a CustomLogger instance that automatically captures caller info
-logger = logging.getLogger('rooster_api')
+logger = logging.getLogger('sprint2code_api')
 
 # Wrapper functions
 # The log prefix is now based on actual caller module:function from CustomLogger.

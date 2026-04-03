@@ -1585,6 +1585,28 @@ class DeploymentFixer:
                 files[file_path]['missing'].append(error)
                 continue
 
+            # Pydantic Settings missing required environment variables
+            pyd_settings_match = re.search(
+                r"PydanticSettingsError in '([^']+)': Missing required settings: (.+)",
+                error
+            )
+            if pyd_settings_match:
+                settings_path = pyd_settings_match.group(1).strip()
+                missing_list = pyd_settings_match.group(2).strip()
+                if settings_path.startswith("backend/"):
+                    file_path = settings_path
+                elif "/" in settings_path:
+                    file_path = self._apply_prefix(backend_prefix, settings_path)
+                else:
+                    file_path = self._apply_prefix(backend_prefix, settings_path)
+                file_path = self._normalize_file_path(file_path, repo_dir)
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(f"Missing settings: {missing_list}")
+                continue
+
             runtime_name_match = re.search(
                 r"RuntimeNameError in '([^']+)': name '([^']+)' is not defined",
                 error
@@ -1835,7 +1857,7 @@ class DeploymentFixer:
                         content = _safe_read(local)
                         files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                     files[dep_path]['missing'].append(f"Missing export: {missing_export}")
-                    files[dep_path]['dependent_files'].append(importer_path)
+                    files[dep_path].setdefault('dependent_files', []).append(importer_path)
 
                 # Check if it's a "not found in" export error (non-TS2305 formats).
                 not_found_match = re.search(r"'([^']+)'\s+not found in '([^']+)'", error)
@@ -1849,13 +1871,21 @@ class DeploymentFixer:
                         content = _safe_read(local)
                         files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                     files[dep_path]['missing'].append(f"Missing export: {missing_export}")
-                    files[dep_path]['dependent_files'].append(importer_path)
+                    files[dep_path].setdefault('dependent_files', []).append(importer_path)
                     continue
 
                 # Check if it's a "Cannot find module" error indicating missing package
                 module_match = re.search(r"(?:2307:\s*)?Cannot find module '([^']+)'", error)
                 if module_match:
                     missing_module = module_match.group(1)
+                    if missing_module.startswith("src/"):
+                        src_file_path = self._normalize_file_path(importer_path, repo_dir)
+                        if src_file_path not in files:
+                            local = os.path.join(repo_dir, src_file_path)
+                            content = _safe_read(local)
+                            files[src_file_path] = {'missing': [], 'content': content}
+                        files[src_file_path]['missing'].append("Fix import alias: replace 'src/' with '@/'")
+                        continue
                     # NEW: Alias import mistakenly includes /src/ segment (e.g., "@/src/...")
                     if missing_module.startswith("@/src/") or missing_module.startswith("~/src/"):
                         src_file_path = self._normalize_file_path(importer_path, repo_dir)
@@ -1877,7 +1907,7 @@ class DeploymentFixer:
                             content = _safe_read(local)
                             files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                         files[dep_path]['missing'].append(f"Missing local module for import: {missing_module}")
-                        files[dep_path]['dependent_files'].append(importer_path)
+                        files[dep_path].setdefault('dependent_files', []).append(importer_path)
                         continue
 
                     # Extract package name.
@@ -2280,6 +2310,9 @@ class DeploymentFixer:
             return True
         if file_path.endswith('.py') and any('SyntaxError in' in err for err in missing_items):
             return True
+        # Pydantic settings missing env vars -> add defaults programmatically.
+        if file_path.endswith(('config.py', 'settings.py')) and any('Missing settings:' in err for err in missing_items):
+            return True
         # Deterministic fix: main.py cannot use relative imports (from .x import y).
         if file_path.endswith('main.py') and any('CANNOT use relative imports' in err for err in missing_items):
             return True
@@ -2352,6 +2385,11 @@ class DeploymentFixer:
             # NEW: Programmatic fix for AI Concatenation Errors
             elif any("AI Concatenation Error" in str(err) for err in file_info.get('missing', [])):
                 return await self._split_concatenated_files(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Pydantic Settings missing required env vars
+            elif file_path.endswith(('config.py', 'settings.py')) and any(
+                'Missing settings:' in str(err) for err in file_info.get('missing', [])
+            ):
+                return await self.backend_fixer._fix_pydantic_settings_missing(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('.py') and '/models/' in file_path:
                 return await self.backend_fixer._fix_backend_model(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('.py') and any('File does not exist - CREATE IT' in str(err) for err in file_info.get('missing', [])):
@@ -2402,6 +2440,16 @@ class DeploymentFixer:
                 for err in file_info.get('missing', [])
             ):
                 return await self.frontend_fixer._fix_auth_page_missing_form_props(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.ts', '.tsx')) and any(
+                "TypeError in '" in str(err) and "expects at least" in str(err)
+                for err in file_info.get('missing', [])
+            ):
+                return await self.frontend_fixer._fix_ts_call_arity(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.ts', '.tsx')) and any(
+                "does not exist on type 'string'" in str(err)
+                for err in file_info.get('missing', [])
+            ):
+                return await self.frontend_fixer._fix_ts_string_property_access(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.ts', '.tsx')) and any(
                 ("does not exist in type" in str(err)) or ("Property '" in str(err) and "does not exist on type" in str(err))
                 for err in file_info.get('missing', [])

@@ -14,6 +14,8 @@ skill_registry = SkillRegistry()
 class GenerateRequest(BaseModel):
     story_id: str
     skill_names: Optional[List[str]] = None
+    min_backend_subtasks: Optional[int] = None
+    min_frontend_subtasks: Optional[int] = None
 
 from fastapi import UploadFile, File, Form
 
@@ -92,7 +94,9 @@ async def start_generation(request: GenerateRequest, authorization: str = Header
         job_id = await agent.start_job(
             request.story_id,
             email,
-            skill_names=request.skill_names or []
+            skill_names=request.skill_names or [],
+            min_backend_subtasks=request.min_backend_subtasks,
+            min_frontend_subtasks=request.min_frontend_subtasks
         )
         return {"job_id": job_id, "status": "RUNNING"}
     except HTTPException:
