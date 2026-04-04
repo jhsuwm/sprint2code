@@ -1270,6 +1270,62 @@ class FrontendFixer:
         self.fixer._safe_log(job_id, f"✅ {action} tsconfig.json with moduleResolution=node", "Programmatic Create/Fix")
         return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
 
+
+    async def _fix_tsconfig_path_alias(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Ensure tsconfig/jsconfig has @/* (or ~/*) path alias configured."""
+        local = os.path.join(repo_dir, file_path)
+        if not os.path.exists(local) or os.path.getsize(local) == 0:
+            return await self._create_tsconfig(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+
+        try:
+            with open(local, 'r', encoding='utf-8') as f:
+                raw = f.read()
+        except Exception:
+            return False
+
+        data = self.fixer._resilient_json_parse(raw)
+        if data is None:
+            return False
+
+        compiler = data.get('compilerOptions', {}) if isinstance(data, dict) else {}
+        changed = False
+        if compiler.get('baseUrl') is None:
+            compiler['baseUrl'] = '.'
+            changed = True
+
+        paths = compiler.get('paths', {}) if isinstance(compiler.get('paths', {}), dict) else {}
+
+        frontend_root = os.path.dirname(local)
+        src_dir = os.path.join(frontend_root, 'src')
+        target = './src/*' if os.path.isdir(src_dir) else './*'
+
+        missing_blob = ' '.join(str(m) for m in file_info.get('missing', []))
+        alias_keys = set()
+        if '@/' in missing_blob or '@/*' in missing_blob:
+            alias_keys.add('@/*')
+        if '~/' in missing_blob or '~/*' in missing_blob:
+            alias_keys.add('~/*')
+        if not alias_keys:
+            alias_keys.add('@/*')
+
+        for key in alias_keys:
+            if paths.get(key) != [target]:
+                paths[key] = [target]
+                changed = True
+
+        if not changed:
+            return False
+
+        compiler['paths'] = paths
+        data['compilerOptions'] = compiler
+
+        content = json.dumps(data, indent=2) + "\n"
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self.fixer._safe_log(job_id, f"✅ Added path alias mapping in {file_path}", "Programmatic Create/Fix")
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     def _get_redundant_type_context(self, repo_dir: str, file_path: str, info: dict) -> str:
         """Find multiple definitions of types mentioned in errors and provide them as context"""
         missing = info.get('missing', [])

@@ -914,8 +914,32 @@ class User(BaseModel):
             if file_path and content:
                 files.append({'file_path': file_path, 'content': content})
                 logger.info(f"✅ [AIService] Parsed file: {file_path} ({len(content)} chars)")
-        
+
+        # Fallback: handle FILE_PATH blocks missing explicit --- separators
         if not files:
+            loose_pattern = re.compile(
+                r"(?:^|\n)\s*(?:FILE_PATH:|FILE:)\s*(?P<path>[^\n]+)\n(?P<content>.*?)(?=(?:\n\s*(?:FILE_PATH:|FILE:)|\Z))",
+                re.DOTALL
+            )
+            loose_matches = list(loose_pattern.finditer(response))
+            if loose_matches:
+                logger.info(f"🔍 [AIService] Fallback parsed {len(loose_matches)} FILE block(s) without --- separators")
+                for m in loose_matches:
+                    file_path = m.group('path').strip()
+                    content = m.group('content').strip()
+                    # Clean common wrappers
+                    content = re.sub(r'^```(?:\w+)?\n', '', content)
+                    content = re.sub(r'\n```$', '', content)
+                    content = re.sub(r'^-{3,}\n', '', content)
+                    content = re.sub(r'\n-{3,}$', '', content)
+                    content = content.strip()
+                    if file_path and content:
+                        files.append({'file_path': file_path, 'content': content})
+                        logger.info(f"✅ [AIService] Fallback parsed file: {file_path} ({len(content)} chars)")
+
+        if not files:
+            snippet = response[:1200].replace("\n", "\\n")
             logger.error("❌ [AIService] Failed to extract any valid files from response!")
+            logger.error(f"🔎 [AIService] Parse failure snippet (first 1200 chars): {snippet}")
         
         return files

@@ -362,7 +362,9 @@ class DeploymentValidator:
                         if target_file and os.path.exists(target_file):
                             with open(target_file, 'r', encoding='utf-8') as tf:
                                 target_content = tf.read()
-                                members = [m.strip().split(' as ')[0].strip() for m in members_raw.split(',')]
+                                clean_members = re.sub(r"/\*.*?\*/", "", members_raw, flags=re.DOTALL)
+                                clean_members = re.sub(r"//.*", "", clean_members)
+                                members = [m.strip().split(' as ')[0].strip() for m in clean_members.split(',')]
                                 for member in members:
                                     if member and member != '*' and not re.search(rf"export\s+(type|interface|const|let|var|function|class|enum)\s+{member}\b|export\s+{{[^}}]*\b{member}\b[^}}]*}}", target_content):
                                         errors.append(f"ImportError in '{rel_path}': '{member}' not found in '{path}'")
