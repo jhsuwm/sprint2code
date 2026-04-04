@@ -33,9 +33,10 @@ class DeploymentValidator:
         typescript_errors = self._validate_typescript_types(repo_dir)
         property_errors = self._validate_typescript_properties(repo_dir)
         concat_errors = self._validate_concatenated_files(repo_dir)
+        asset_errors = self._validate_frontend_asset_imports(repo_dir)
         
         # CRITICAL: Filter out test file errors - they don't affect production deployment
-        all_errors = import_errors + dependency_errors + typescript_errors + property_errors + concat_errors
+        all_errors = import_errors + dependency_errors + typescript_errors + property_errors + concat_errors + asset_errors
         production_errors = [e for e in all_errors if not self._is_test_file_error(e)]
         
         filtered_count = len(all_errors) - len(production_errors)
@@ -361,7 +362,9 @@ class DeploymentValidator:
                         if target_file and os.path.exists(target_file):
                             with open(target_file, 'r', encoding='utf-8') as tf:
                                 target_content = tf.read()
-                                members = [m.strip().split(' as ')[0].strip() for m in members_raw.split(',')]
+                                clean_members = re.sub(r"/\*.*?\*/", "", members_raw, flags=re.DOTALL)
+                                clean_members = re.sub(r"//.*", "", clean_members)
+                                members = [m.strip().split(' as ')[0].strip() for m in clean_members.split(',')]
                                 for member in members:
                                     if member and member != '*' and not re.search(rf"export\s+(type|interface|const|let|var|function|class|enum)\s+{member}\b|export\s+{{[^}}]*\b{member}\b[^}}]*}}", target_content):
                                         errors.append(f"ImportError in '{rel_path}': '{member}' not found in '{path}'")
@@ -686,4 +689,81 @@ class DeploymentValidator:
             except Exception:
                 continue
 
+        return errors
+
+    def _validate_frontend_asset_imports(self, repo_dir: str) -> List[str]:
+        """Validate that CSS files, images, and other assets imported in frontend code actually exist"""
+        errors = []
+        frontend_dir = self._detect_frontend_root(repo_dir)
+        if not frontend_dir:
+            return []
+        
+        logger.info("Starting frontend asset import validation...")
+        
+        # Patterns to match asset imports
+        # CSS: import './globals.css' or import styles from './styles.module.css'
+        # Images: import logo from './logo.png' or import './image.jpg'
+        asset_import_pattern = r'''import\s+(?:(?:\w+|\{[^}]+\})\s+from\s+)?['"]([^'"]+\.(?:css|scss|sass|less|png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot|otf))['"]'''
+        
+        ignore_dirs = {'node_modules', '.next', '.git', 'out', 'build', 'dist', 'coverage', 'public'}
+        
+        for root, dirs, files in os.walk(frontend_dir):
+            dirs[:] = [d for d in dirs if d not in ignore_dirs]
+            for file in files:
+                if not file.endswith(('.ts', '.tsx', '.js', '.jsx')):
+                    continue
+                
+                file_path = os.path.join(root, file)
+                rel_path = os.path.relpath(file_path, frontend_dir).replace(os.path.sep, '/')
+                
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    
+                    # Find all asset imports
+                    matches = re.finditer(asset_import_pattern, content)
+                    for match in matches:
+                        asset_path = match.group(1)
+                        
+                        # Resolve the asset file path relative to the importing file
+                        if asset_path.startswith('./') or asset_path.startswith('../'):
+                            # Relative import
+                            resolved_path = os.path.normpath(os.path.join(os.path.dirname(file_path), asset_path))
+                        elif asset_path.startswith('@/'):
+                            # Next.js @ alias points to src/
+                            resolved_path = os.path.join(frontend_dir, 'src', asset_path[2:])
+                            if not os.path.exists(resolved_path):
+                                # Fallback: @ might point to frontend root or app/
+                                resolved_path = os.path.join(frontend_dir, asset_path[2:])
+                                if not os.path.exists(resolved_path):
+                                    resolved_path = os.path.join(frontend_dir, 'app', asset_path[2:])
+                        elif asset_path.startswith('~/'):
+                            # ~/ alias also points to src/ in some configs
+                            resolved_path = os.path.join(frontend_dir, 'src', asset_path[2:])
+                        elif asset_path.startswith('/'):
+                            # Absolute path from frontend root
+                            resolved_path = os.path.join(frontend_dir, asset_path[1:])
+                        else:
+                            # Direct path (might be in public/ or another location)
+                            # Try both relative to importing file and relative to frontend root
+                            resolved_path = os.path.normpath(os.path.join(os.path.dirname(file_path), asset_path))
+                            if not os.path.exists(resolved_path):
+                                resolved_path = os.path.join(frontend_dir, asset_path)
+                        
+                        # Check if the asset file exists
+                        if not os.path.exists(resolved_path):
+                            asset_type = 'CSS file' if asset_path.endswith(('.css', '.scss', '.sass', '.less')) else \
+                                         'image file' if asset_path.endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico')) else \
+                                         'font file' if asset_path.endswith(('.woff', '.woff2', '.ttf', '.eot', '.otf')) else 'asset file'
+                            errors.append(f"AssetError in '{rel_path}': {asset_type} '{asset_path}' not found - file does not exist at expected location")
+                
+                except Exception as e:
+                    logger.warning(f"Error validating assets in {rel_path}: {e}")
+                    continue
+        
+        if errors:
+            logger.info(f"Frontend asset validation found {len(errors)} missing asset(s)")
+        else:
+            logger.info("Frontend asset validation passed - all imported assets exist")
+        
         return errors

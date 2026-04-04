@@ -14,7 +14,9 @@ class JobManager:
         self,
         story_id: str,
         user_email: str,
-        skill_names: Optional[List[str]] = None
+        skill_names: Optional[List[str]] = None,
+        min_backend_subtasks: Optional[int] = None,
+        min_frontend_subtasks: Optional[int] = None
     ) -> str:
         job_id = str(uuid.uuid4())
         job_store[job_id] = {
@@ -22,6 +24,8 @@ class JobManager:
             "story_id": story_id,
             "user_email": user_email,
             "skill_names": skill_names or [],
+            "min_backend_subtasks": min_backend_subtasks,
+            "min_frontend_subtasks": min_frontend_subtasks,
             "status": "RUNNING",
             "logs": [],
             "frontend_logs": [],

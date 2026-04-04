@@ -44,9 +44,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include authentication routes - DISABLED (Firestore dependency from rooster)
-# app.include_router(auth_router, prefix="/auth", tags=["authentication"])
-
 # Include agents routes
 app.include_router(agents_router, prefix="/agents", tags=["agents"])
 

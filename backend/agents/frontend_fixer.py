@@ -554,6 +554,21 @@ class FrontendFixer:
                 return False
 
         for name in missing_names:
+            # If symbol exists locally but just isn't exported, add a named export.
+            has_local_def = re.search(
+                rf"\b(?:function|const|let|var|class|type|interface|enum)\s+{re.escape(name)}\b",
+                content
+            )
+            has_export = re.search(
+                rf"\bexport\s+(?:async\s+)?(?:function|const|let|var|class|type|interface|enum)\s+{re.escape(name)}\b",
+                content
+            ) or re.search(
+                rf"\bexport\s*\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}",
+                content
+            )
+            if has_local_def and not has_export:
+                content = content.rstrip() + f"\n\nexport {{ {name} }};\n"
+                continue
             if re.search(rf"\bexport\s+(?:async\s+)?(?:function|const|let|var|class|type|interface|enum)\s+{re.escape(name)}\b", content):
                 continue
             if re.search(rf"\bexport\s*\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}", content):
@@ -574,6 +589,84 @@ class FrontendFixer:
         self.fixer._safe_log(job_id, f"✅ Added missing TS exports {missing_names} to {file_path}", "Programmatic Export Fix")
         return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
 
+    async def _fix_ts_call_arity(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix TS call sites where functions are called with too few args."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content') or ''
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+        for item in file_info.get('missing', []):
+            m = re.search(
+                r"TypeError in '[^']+': Function '([^']+)' expects at least (\d+) arguments, but found (\d+)",
+                str(item)
+            )
+            if not m:
+                continue
+            func_name = m.group(1)
+            min_params = int(m.group(2))
+            # Replace calls that have too few arguments.
+            def _replace_call(match: re.Match) -> str:
+                args_raw = match.group('args')
+                args_count = 0 if not args_raw.strip() else args_raw.count(',') + 1
+                if args_count >= min_params:
+                    return match.group(0)
+                # Avoid function declarations like "function foo(...)"
+                prefix = content[max(0, match.start() - 30):match.start()]
+                if re.search(r"(?:export\s+)?(?:async\s+)?function\s+$", prefix):
+                    return match.group(0)
+                missing_count = min_params - args_count
+                filler = ", ".join(["undefined"] * missing_count)
+                new_args = args_raw.strip()
+                if new_args:
+                    new_args = f"{new_args}, {filler}"
+                else:
+                    new_args = filler
+                return f"{func_name}({new_args})"
+
+            pattern = re.compile(rf"\b{re.escape(func_name)}\s*\((?P<args>[^)]*)\)")
+            content = pattern.sub(_replace_call, content)
+
+        if content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self.fixer._safe_log(job_id, f"✅ Patched call arity mismatches in {file_path}", "Programmatic Arity Fix")
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_ts_string_property_access(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix property access on string types (e.g., data.id when data is a string)."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content') or ''
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+        for item in file_info.get('missing', []):
+            m = re.search(r"Property '([^']+)' does not exist on type 'string'", str(item))
+            if not m:
+                continue
+            prop = m.group(1)
+            if prop == "id":
+                # Target the common pattern data.id to avoid altering unrelated objects.
+                content = re.sub(r"\bdata\.id\b", "String(data)", content)
+
+        if content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self.fixer._safe_log(job_id, f"✅ Patched string property access in {file_path}", "Programmatic Property Fix")
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     async def _fix_ts_missing_type_property(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         missing_items = [str(err) for err in file_info.get('missing', [])]
         if not missing_items:
@@ -592,6 +685,78 @@ class FrontendFixer:
                 break
         if not prop_name or not type_name:
             return False
+
+        def _normalize_prop(name: str) -> str:
+            return name.lower().replace('_', '')
+
+        def _strip_bool_prefix(name: str) -> str:
+            lowered = name
+            for prefix in ("is", "has", "can", "should"):
+                if lowered.startswith(prefix) and len(lowered) > len(prefix):
+                    return lowered[len(prefix):]
+            return lowered
+
+        def _extract_type_props(ts: str) -> List[str]:
+            interface_pat = re.compile(rf"interface\s+{re.escape(type_name)}\s*\{{(?P<body>[^}}]*)\}}", re.DOTALL)
+            type_pat = re.compile(rf"type\s+{re.escape(type_name)}\s*=\s*\{{(?P<body>[^}}]*)\}}", re.DOTALL)
+            match = interface_pat.search(ts) or type_pat.search(ts)
+            if not match:
+                return []
+            body = match.group("body")
+            return re.findall(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[:?]', body, re.MULTILINE)
+
+        def _find_similar_prop() -> tuple[str | None, str | None]:
+            prefixes = self.fixer._repo_prefixes(repo_dir)
+            frontend_prefix = prefixes["frontend"]
+            frontend_root = os.path.join(repo_dir, frontend_prefix) if frontend_prefix else repo_dir
+            ignore_dirs = {'node_modules', '.next', '.git', 'out', 'build', 'dist', 'coverage'}
+
+            normalized_missing = _normalize_prop(prop_name)
+            normalized_missing_no_prefix = _strip_bool_prefix(normalized_missing)
+
+            candidates = []
+            for root, dirs, files in os.walk(frontend_root):
+                dirs[:] = [d for d in dirs if d not in ignore_dirs]
+                for fname in files:
+                    if not fname.endswith(('.ts', '.tsx')):
+                        continue
+                    full_path = os.path.join(root, fname)
+                    try:
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            ts = f.read()
+                    except Exception:
+                        continue
+                    props = _extract_type_props(ts)
+                    if not props:
+                        continue
+                    for candidate in props:
+                        norm = _normalize_prop(candidate)
+                        norm_stripped = _strip_bool_prefix(norm)
+                        if norm == normalized_missing or norm_stripped == normalized_missing or norm == normalized_missing_no_prefix:
+                            rel_path = os.path.relpath(full_path, repo_dir).replace("\\", "/")
+                            return candidate, rel_path
+                    candidates.append((full_path, props))
+            return None, None
+
+        suggested_prop, type_def_path = _find_similar_prop()
+        if suggested_prop and suggested_prop != prop_name:
+            local = os.path.join(repo_dir, file_path)
+            content = file_info.get('content', '')
+            if not content and os.path.exists(local):
+                with open(local, 'r', encoding='utf-8') as f:
+                    content = f.read()
+            if content:
+                pattern = re.compile(rf"\b{re.escape(prop_name)}\b")
+                updated = pattern.sub(suggested_prop, content)
+                if updated != content:
+                    with open(local, 'w', encoding='utf-8') as f:
+                        f.write(updated)
+                    self.fixer._safe_log(
+                        job_id,
+                        f"🧹 Replaced '{prop_name}' with '{suggested_prop}' in {file_path} (matched {type_name} in {type_def_path})",
+                        "Programmatic Fix"
+                    )
+                    return await self.fixer._commit_programmatic_fix(job_id, file_path, updated, github_repo, github_branch)
 
         def _guess_type(prop: str) -> str:
             prop_l = prop.lower()
@@ -660,8 +825,145 @@ class FrontendFixer:
 
         return False
 
+    async def _fix_missing_css_file(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Create missing CSS files with basic boilerplate content"""
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        
+        # Extract the CSS file path from AssetError
+        css_file_path = None
+        for err in missing_items:
+            match = re.search(r"AssetError in '[^']+': CSS file '([^']+)' not found", err)
+            if match:
+                css_file_path = match.group(1)
+                break
+        
+        if not css_file_path:
+            return False
+        
+        # Resolve CSS file location
+        local = os.path.join(repo_dir, file_path)
+        if not os.path.exists(local):
+            return False
+        
+        # Calculate the CSS file's absolute path relative to the importing file
+        if css_file_path.startswith('./') or css_file_path.startswith('../'):
+            css_absolute = os.path.normpath(os.path.join(os.path.dirname(local), css_file_path))
+        elif css_file_path.startswith('@/'):
+            frontend_dir = os.path.dirname(local)
+            while frontend_dir != repo_dir and not os.path.exists(os.path.join(frontend_dir, 'package.json')):
+                frontend_dir = os.path.dirname(frontend_dir)
+            css_absolute = os.path.join(frontend_dir, 'src', css_file_path[2:])
+            # Fallback for app/ directory structure
+            if not os.path.dirname(css_absolute).startswith(os.path.join(frontend_dir, 'src')):
+                css_absolute = os.path.join(frontend_dir, 'app', css_file_path[2:])
+        else:
+            css_absolute = os.path.normpath(os.path.join(os.path.dirname(local), css_file_path))
+        
+        # Create the CSS file with appropriate boilerplate
+        css_filename = os.path.basename(css_file_path)
+        if css_filename in ('globals.css', 'global.css'):
+            content = (
+                "@tailwind base;\n"
+                "@tailwind components;\n"
+                "@tailwind utilities;\n\n"
+                "/* Global styles */\n"
+                "* {\n"
+                "  box-sizing: border-box;\n"
+                "  padding: 0;\n"
+                "  margin: 0;\n"
+                "}\n\n"
+                "html,\n"
+                "body {\n"
+                "  max-width: 100vw;\n"
+                "  overflow-x: hidden;\n"
+                "}\n"
+            )
+        elif '.module.css' in css_filename:
+            content = (
+                "/* CSS Module */\n"
+                ".container {\n"
+                "  padding: 1rem;\n"
+                "}\n"
+            )
+        else:
+            content = (
+                "/* Auto-generated CSS file */\n"
+                "/* Add your styles here */\n"
+            )
+        
+        # Create directory if needed
+        os.makedirs(os.path.dirname(css_absolute), exist_ok=True)
+        
+        # Write the CSS file
+        with open(css_absolute, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        # Get repo-relative path for commit
+        css_repo_path = os.path.relpath(css_absolute, repo_dir).replace(os.path.sep, '/')
+        
+        self.fixer._safe_log(
+            job_id,
+            f"✅ Created missing CSS file: {css_repo_path}",
+            "Programmatic CSS Fix"
+        )
+        
+        return await self.fixer._commit_programmatic_fix(job_id, css_repo_path, content, github_repo, github_branch)
+
+    async def _fix_axios_interceptor_type(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix Axios interceptor type mismatch - use InternalAxiosRequestConfig instead of AxiosRequestConfig."""
+        if not file_path.endswith(('.ts', '.tsx')):
+            return False
+        
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content') or ''
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+        
+        # Check if this file has Axios interceptor issues
+        missing_errors = [str(err) for err in file_info.get('missing', [])]
+        has_interceptor_type_issue = any(
+            'AxiosRequestConfig' in err and 'InternalAxiosRequestConfig' in err 
+            for err in missing_errors
+        )
+        
+        if not has_interceptor_type_issue:
+            return False
+        
+        original = content
+        
+        # Fix import: Add InternalAxiosRequestConfig to imports if not present
+        if 'InternalAxiosRequestConfig' not in content and 'from \'axios\'' in content:
+            content = re.sub(
+                r"import\s+(axios,\s*)?\{([^}]+)\}\s+from\s+['\"]axios['\"];?",
+                lambda m: f"import {m.group(1) or ''}{{ {m.group(2).strip()}, InternalAxiosRequestConfig }} from 'axios';",
+                content
+            )
+        
+        # Replace AxiosRequestConfig with InternalAxiosRequestConfig in interceptor signatures
+        content = re.sub(
+            r"\(config:\s*AxiosRequestConfig\)\s*=>",
+            r"(config: InternalAxiosRequestConfig) =>",
+            content
+        )
+        
+        if content == original:
+            return False
+        
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        self.fixer._safe_log(
+            job_id,
+            f"✅ Fixed Axios interceptor type (AxiosRequestConfig → InternalAxiosRequestConfig) in {file_path}",
+            "Programmatic Axios Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     async def _fix_frontend_alias_src_prefix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
-        """Fix alias imports like '@/src/...' or '~/src/...' to '@/...' or '~/...'."""
+        """Fix alias imports like '@/src/...' or 'src/...' to '@/...'."""
         local = os.path.join(repo_dir, file_path)
         content = file_info.get('content') or ''
         if not content and os.path.exists(local):
@@ -673,6 +975,7 @@ class FrontendFixer:
         original = content
         content = re.sub(r"(['\"])@/src/", r"\1@/", content)
         content = re.sub(r"(['\"])~/src/", r"\1~/", content)
+        content = re.sub(r"(['\"])src/", r"\1@/", content)
 
         if content == original:
             return False
@@ -965,6 +1268,62 @@ class FrontendFixer:
 
         action = "Patched (bundler→node)" if needs_patch else "Created"
         self.fixer._safe_log(job_id, f"✅ {action} tsconfig.json with moduleResolution=node", "Programmatic Create/Fix")
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+
+    async def _fix_tsconfig_path_alias(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Ensure tsconfig/jsconfig has @/* (or ~/*) path alias configured."""
+        local = os.path.join(repo_dir, file_path)
+        if not os.path.exists(local) or os.path.getsize(local) == 0:
+            return await self._create_tsconfig(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+
+        try:
+            with open(local, 'r', encoding='utf-8') as f:
+                raw = f.read()
+        except Exception:
+            return False
+
+        data = self.fixer._resilient_json_parse(raw)
+        if data is None:
+            return False
+
+        compiler = data.get('compilerOptions', {}) if isinstance(data, dict) else {}
+        changed = False
+        if compiler.get('baseUrl') is None:
+            compiler['baseUrl'] = '.'
+            changed = True
+
+        paths = compiler.get('paths', {}) if isinstance(compiler.get('paths', {}), dict) else {}
+
+        frontend_root = os.path.dirname(local)
+        src_dir = os.path.join(frontend_root, 'src')
+        target = './src/*' if os.path.isdir(src_dir) else './*'
+
+        missing_blob = ' '.join(str(m) for m in file_info.get('missing', []))
+        alias_keys = set()
+        if '@/' in missing_blob or '@/*' in missing_blob:
+            alias_keys.add('@/*')
+        if '~/' in missing_blob or '~/*' in missing_blob:
+            alias_keys.add('~/*')
+        if not alias_keys:
+            alias_keys.add('@/*')
+
+        for key in alias_keys:
+            if paths.get(key) != [target]:
+                paths[key] = [target]
+                changed = True
+
+        if not changed:
+            return False
+
+        compiler['paths'] = paths
+        data['compilerOptions'] = compiler
+
+        content = json.dumps(data, indent=2) + "\n"
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self.fixer._safe_log(job_id, f"✅ Added path alias mapping in {file_path}", "Programmatic Create/Fix")
         return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
 
     def _get_redundant_type_context(self, repo_dir: str, file_path: str, info: dict) -> str:

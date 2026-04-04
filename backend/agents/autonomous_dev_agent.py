@@ -45,12 +45,16 @@ class AutonomousDevAgent:
         self,
         story_id: str,
         user_email: str,
-        skill_names: Optional[List[str]] = None
+        skill_names: Optional[List[str]] = None,
+        min_backend_subtasks: Optional[int] = None,
+        min_frontend_subtasks: Optional[int] = None
     ) -> str:
         job_id = self.job_manager.create_job(
             story_id,
             user_email,
-            skill_names=skill_names
+            skill_names=skill_names,
+            min_backend_subtasks=min_backend_subtasks,
+            min_frontend_subtasks=min_frontend_subtasks
         )
         asyncio.create_task(self._run_pipeline(job_id, story_id))
         return job_id

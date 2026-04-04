@@ -237,8 +237,6 @@ async def get_agents_info(user_id: str = Depends(get_current_user_id)):
         )
 
 
-# chat-history endpoint removed - Firestore dependency from rooster
-
 
 # Vacation-specific routes removed - stubbed out for autonomous dev orchestrator
 # router.include_router(booking_router)

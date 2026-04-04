@@ -925,6 +925,15 @@ class DeploymentFixer:
             
             parsed = self.ai_service.parse_generated_code(code)
             if not parsed:
+                fallback_content = self._fallback_extract_target_content(code, target_file, repo_dir)
+                if fallback_content:
+                    self._safe_log(
+                        job_id,
+                        f"⚠️ AI output parse fallback applied for {target_file} (using inferred code block)",
+                        "Parse Fallback",
+                        level="WARNING"
+                    )
+                    return {'target_content': fallback_content, 'related_files': []}
                 return None
 
             target_content = None
@@ -953,7 +962,18 @@ class DeploymentFixer:
 
             if target_content is None:
                 if len(parsed) == 1:
-                    target_content = parsed[0].get('content')
+                    raw_path = parsed[0].get('file_path', '')
+                    full_path = self._coerce_generated_path(raw_path, target_file, repo_dir)
+                    if raw_path and self._paths_match(full_path, target_file):
+                        target_content = parsed[0].get('content')
+                    else:
+                        self._safe_log(
+                            job_id,
+                            f"⚠️ AI output block path mismatch for {target_file} (got '{raw_path}'). Discarding.",
+                            "Parse Mismatch",
+                            level="WARNING"
+                        )
+                        return None
                 else:
                     self._safe_log(job_id, f"⚠️ AI output missing target file block for {target_file}", "Parse Mismatch", level="WARNING")
                     return None
@@ -972,6 +992,65 @@ class DeploymentFixer:
         except Exception as e:
             logger.error(f"Generate fix failed for {target_file}: {e}")
             return None
+
+    def _strip_code_wrappers(self, content: str) -> str:
+        text = (content or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r'^```(?:\w+)?\n', '', text)
+        text = re.sub(r'\n```$', '', text)
+        text = re.sub(r'^-{3,}\n', '', text)
+        text = re.sub(r'\n-{3,}$', '', text)
+        return text.strip()
+
+    def _looks_like_code(self, text: str) -> bool:
+        if not text:
+            return False
+        snippet = text[:2000]
+        tokens = ("import ", "export ", "const ", "function ", "class ", "interface ", "type ", "from ")
+        if any(tok in snippet for tok in tokens) and snippet.count("\n") >= 3:
+            return True
+        if "{" in snippet and "}" in snippet and ";" in snippet and snippet.count("\n") >= 3:
+            return True
+        return False
+
+    def _fallback_extract_target_content(self, response: str, target_file: str, repo_dir: str) -> Optional[str]:
+        """Recover code when AI output omits strict FILE_PATH/--- formatting."""
+        if not response:
+            return None
+
+        # Attempt FILE_PATH blocks without separators.
+        loose_pattern = re.compile(
+            r"(?:^|\n)\s*(?:FILE_PATH:|FILE:)\s*(?P<path>[^\n]+)\n(?P<content>.*?)(?=(?:\n\s*(?:FILE_PATH:|FILE:)|\Z))",
+            re.DOTALL
+        )
+        loose_matches = list(loose_pattern.finditer(response))
+        if loose_matches:
+            # Prefer the block whose path matches the target.
+            for m in loose_matches:
+                raw_path = m.group('path').strip()
+                content = self._strip_code_wrappers(m.group('content'))
+                full_path = self._coerce_generated_path(raw_path, target_file, repo_dir)
+                if self._paths_match(full_path, target_file) and content:
+                    return content
+            # Fallback to the first block if there is only one.
+            if len(loose_matches) == 1:
+                return self._strip_code_wrappers(loose_matches[0].group('content'))
+
+        # Attempt to recover from markdown code fences.
+        fence_blocks = re.findall(r"```(?:\w+)?\n([\s\S]*?)\n```", response)
+        if fence_blocks:
+            candidate = max(fence_blocks, key=len)
+            candidate = self._strip_code_wrappers(candidate)
+            if candidate:
+                return candidate
+
+        # Last resort: strip common headings and use raw text if it looks like code.
+        cleaned = re.sub(r"(?m)^(ROOT_CAUSE|COMPLETE_FIX|VERIFICATION|PLAN):.*$", "", response).strip()
+        cleaned = self._strip_code_wrappers(cleaned)
+        if self._looks_like_code(cleaned):
+            return cleaned
+        return None
 
     async def _generate_file_fix(self, job_id: str, target_file: str, info: dict, github_repo: str, github_branch: str, repo_dir: str, yaml_context: str = "", story_context: str = "") -> Optional[str]:
         """Generate fixed content for a file without committing - returns content or None."""
@@ -1408,6 +1487,7 @@ class DeploymentFixer:
         prompt += "COMPLETE_FIX: <Exact changes that will eliminate ALL errors listed above>\n"
         prompt += "VERIFICATION: <How you verified ALL errors will be gone after this fix>\n\n"
         prompt += f"FILE_PATH: {output_file_path}\n---\n[COMPLETE ERROR-FREE CODE]\n---\n"
+        prompt += "🚨 STRICT REQUIREMENT: Output ONLY the file above. Do NOT output any other FILE_PATH blocks.\n"
         return prompt
     
     def _parse_all_errors(self, errors: List[str], repo_dir: str) -> Dict[str, Dict]:
@@ -1583,6 +1663,28 @@ class DeploymentFixer:
                     content = _safe_read(local)
                     files[file_path] = {'missing': [], 'content': content}
                 files[file_path]['missing'].append(error)
+                continue
+
+            # Pydantic Settings missing required environment variables
+            pyd_settings_match = re.search(
+                r"PydanticSettingsError in '([^']+)': Missing required settings: (.+)",
+                error
+            )
+            if pyd_settings_match:
+                settings_path = pyd_settings_match.group(1).strip()
+                missing_list = pyd_settings_match.group(2).strip()
+                if settings_path.startswith("backend/"):
+                    file_path = settings_path
+                elif "/" in settings_path:
+                    file_path = self._apply_prefix(backend_prefix, settings_path)
+                else:
+                    file_path = self._apply_prefix(backend_prefix, settings_path)
+                file_path = self._normalize_file_path(file_path, repo_dir)
+                if file_path not in files:
+                    local = os.path.join(repo_dir, file_path)
+                    content = _safe_read(local)
+                    files[file_path] = {'missing': [], 'content': content}
+                files[file_path]['missing'].append(f"Missing settings: {missing_list}")
                 continue
 
             runtime_name_match = re.search(
@@ -1835,7 +1937,7 @@ class DeploymentFixer:
                         content = _safe_read(local)
                         files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                     files[dep_path]['missing'].append(f"Missing export: {missing_export}")
-                    files[dep_path]['dependent_files'].append(importer_path)
+                    files[dep_path].setdefault('dependent_files', []).append(importer_path)
 
                 # Check if it's a "not found in" export error (non-TS2305 formats).
                 not_found_match = re.search(r"'([^']+)'\s+not found in '([^']+)'", error)
@@ -1849,13 +1951,21 @@ class DeploymentFixer:
                         content = _safe_read(local)
                         files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                     files[dep_path]['missing'].append(f"Missing export: {missing_export}")
-                    files[dep_path]['dependent_files'].append(importer_path)
+                    files[dep_path].setdefault('dependent_files', []).append(importer_path)
                     continue
 
                 # Check if it's a "Cannot find module" error indicating missing package
                 module_match = re.search(r"(?:2307:\s*)?Cannot find module '([^']+)'", error)
                 if module_match:
                     missing_module = module_match.group(1)
+                    if missing_module.startswith("src/"):
+                        src_file_path = self._normalize_file_path(importer_path, repo_dir)
+                        if src_file_path not in files:
+                            local = os.path.join(repo_dir, src_file_path)
+                            content = _safe_read(local)
+                            files[src_file_path] = {'missing': [], 'content': content}
+                        files[src_file_path]['missing'].append("Fix import alias: replace 'src/' with '@/'")
+                        continue
                     # NEW: Alias import mistakenly includes /src/ segment (e.g., "@/src/...")
                     if missing_module.startswith("@/src/") or missing_module.startswith("~/src/"):
                         src_file_path = self._normalize_file_path(importer_path, repo_dir)
@@ -1869,6 +1979,23 @@ class DeploymentFixer:
                             files[src_file_path]['missing'].append("Fix import alias: replace '~/src/' with '~/'")
                         continue
                     # Local alias/path imports are not npm packages; treat them as missing local modules.
+                    if missing_module.startswith(("@/", "~/")):
+                        dep_path = self._resolve_import_path(importer_path, missing_module, repo_dir)
+                        dep_path = self._normalize_file_path(dep_path, repo_dir)
+                        dep_abs = os.path.join(repo_dir, dep_path)
+                        if os.path.exists(dep_abs):
+                            alias_key = "@/*" if missing_module.startswith("@/") else "~/*"
+                            tsconfig_path = self._apply_prefix(frontend_prefix, "tsconfig.json")
+                            jsconfig_path = self._apply_prefix(frontend_prefix, "jsconfig.json")
+                            target_config = tsconfig_path
+                            if not os.path.exists(os.path.join(repo_dir, tsconfig_path)) and os.path.exists(os.path.join(repo_dir, jsconfig_path)):
+                                target_config = jsconfig_path
+                            if target_config not in files:
+                                local = os.path.join(repo_dir, target_config)
+                                content = _safe_read(local)
+                                files[target_config] = {'missing': [], 'content': content}
+                            files[target_config]['missing'].append(f"Missing path alias for '{alias_key}' imports; add paths mapping for {alias_key} to src/* in tsconfig/jsconfig.")
+                            continue
                     if self._is_frontend_alias_package(missing_module) or missing_module.startswith(('./', '../')):
                         dep_path = self._resolve_import_path(importer_path, missing_module, repo_dir)
                         dep_path = self._normalize_file_path(dep_path, repo_dir)
@@ -1877,7 +2004,7 @@ class DeploymentFixer:
                             content = _safe_read(local)
                             files[dep_path] = {'missing': [], 'content': content, 'dependent_files': []}
                         files[dep_path]['missing'].append(f"Missing local module for import: {missing_module}")
-                        files[dep_path]['dependent_files'].append(importer_path)
+                        files[dep_path].setdefault('dependent_files', []).append(importer_path)
                         continue
 
                     # Extract package name.
@@ -2269,7 +2396,7 @@ class DeploymentFixer:
         if file_path.endswith(('requirements.txt', 'package.json')):
             return True
         # Missing mandatory frontend config files - always create programmatically
-        if file_path in ('frontend/next.config.js', 'frontend/tsconfig.json', 'next.config.js', 'tsconfig.json'):
+        if file_path in ('frontend/next.config.js', 'frontend/tsconfig.json', 'frontend/jsconfig.json', 'next.config.js', 'tsconfig.json', 'jsconfig.json'):
             return True
         if file_path.endswith('.py') and '/models/' in file_path:
             return True
@@ -2279,6 +2406,9 @@ class DeploymentFixer:
         if file_path.endswith('.py') and any('Missing export:' in err for err in missing_items):
             return True
         if file_path.endswith('.py') and any('SyntaxError in' in err for err in missing_items):
+            return True
+        # Pydantic settings missing env vars -> add defaults programmatically.
+        if file_path.endswith(('config.py', 'settings.py')) and any('Missing settings:' in err for err in missing_items):
             return True
         # Deterministic fix: main.py cannot use relative imports (from .x import y).
         if file_path.endswith('main.py') and any('CANNOT use relative imports' in err for err in missing_items):
@@ -2335,6 +2465,15 @@ class DeploymentFixer:
         if file_path.endswith(('.ts', '.tsx')) and any(("is not assignable to parameter of type" in err) or ("Type '" in err and "' is not assignable to type '" in err) for err in missing_items):
             # Potential type mismatch due to redundant definitions
             return True
+        # NEW: Axios interceptor type mismatch (AxiosRequestConfig vs InternalAxiosRequestConfig)
+        if file_path.endswith(('.ts', '.tsx')) and any(
+            'AxiosRequestConfig' in err and 'InternalAxiosRequestConfig' in err
+            for err in missing_items
+        ):
+            return True
+        # NEW: Missing CSS/asset files
+        if any('AssetError' in err and 'CSS file' in err for err in missing_items):
+            return True
         return False
     
     async def _apply_programmatic_fix(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
@@ -2347,11 +2486,20 @@ class DeploymentFixer:
             # Missing mandatory frontend configuration files - create with known-good boilerplate
             elif file_path in ('frontend/next.config.js', 'next.config.js'):
                 return await self.frontend_fixer._create_next_config(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('tsconfig.json', 'jsconfig.json')) and any(
+                'Missing path alias' in str(err) for err in file_info.get('missing', [])
+            ):
+                return await self.frontend_fixer._fix_tsconfig_path_alias(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path in ('frontend/tsconfig.json', 'tsconfig.json'):
                 return await self.frontend_fixer._create_tsconfig(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for AI Concatenation Errors
             elif any("AI Concatenation Error" in str(err) for err in file_info.get('missing', [])):
                 return await self._split_concatenated_files(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Pydantic Settings missing required env vars
+            elif file_path.endswith(('config.py', 'settings.py')) and any(
+                'Missing settings:' in str(err) for err in file_info.get('missing', [])
+            ):
+                return await self.backend_fixer._fix_pydantic_settings_missing(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('.py') and '/models/' in file_path:
                 return await self.backend_fixer._fix_backend_model(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('.py') and any('File does not exist - CREATE IT' in str(err) for err in file_info.get('missing', [])):
@@ -2403,10 +2551,29 @@ class DeploymentFixer:
             ):
                 return await self.frontend_fixer._fix_auth_page_missing_form_props(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith(('.ts', '.tsx')) and any(
+                "TypeError in '" in str(err) and "expects at least" in str(err)
+                for err in file_info.get('missing', [])
+            ):
+                return await self.frontend_fixer._fix_ts_call_arity(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.ts', '.tsx')) and any(
+                "does not exist on type 'string'" in str(err)
+                for err in file_info.get('missing', [])
+            ):
+                return await self.frontend_fixer._fix_ts_string_property_access(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            elif file_path.endswith(('.ts', '.tsx')) and any(
                 ("does not exist in type" in str(err)) or ("Property '" in str(err) and "does not exist on type" in str(err))
                 for err in file_info.get('missing', [])
             ):
                 return await self.frontend_fixer._fix_ts_missing_type_property(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # NEW: Axios interceptor type mismatch fix
+            elif file_path.endswith(('.ts', '.tsx')) and any(
+                'AxiosRequestConfig' in str(err) and 'InternalAxiosRequestConfig' in str(err)
+                for err in file_info.get('missing', [])
+            ):
+                return await self.frontend_fixer._fix_axios_interceptor_type(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # NEW: Missing CSS file fix
+            elif file_path.endswith(('.ts', '.tsx', '.js', '.jsx')) and any('AssetError' in str(err) and 'CSS file' in str(err) for err in file_info.get('missing', [])):
+                return await self.frontend_fixer._fix_missing_css_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif '/types/' in file_path and file_path.endswith('.ts'):
                 return await self.frontend_fixer._fix_type_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for "from backend.X" errors

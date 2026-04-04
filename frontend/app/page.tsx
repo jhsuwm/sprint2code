@@ -21,6 +21,8 @@ export default function AutonomousDevDashboard() {
   const [frontendLogs, setFrontendLogs] = useState<string[]>([]);
   const [backendLogs, setBackendLogs] = useState<string[]>([]);
   const [appStatus, setAppStatus] = useState<string | null>(null);
+  const [minBackendSubtasks, setMinBackendSubtasks] = useState<number>(4);
+  const [minFrontendSubtasks, setMinFrontendSubtasks] = useState<number>(3);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const frontendLogsEndRef = useRef<HTMLDivElement>(null);
   const backendLogsEndRef = useRef<HTMLDivElement>(null);
@@ -33,10 +35,20 @@ export default function AutonomousDevDashboard() {
     const savedSpace = localStorage.getItem('selectedSpace');
     const savedEpic = localStorage.getItem('selectedEpic');
     const savedSkillsStr = localStorage.getItem('selectedSkills');
+    const savedMinBackend = localStorage.getItem('minBackendSubtasks');
+    const savedMinFrontend = localStorage.getItem('minFrontendSubtasks');
 
     if (savedSpace) setSelectedSpace(JSON.parse(savedSpace));
     if (savedEpic) setSelectedEpic(JSON.parse(savedEpic));
     if (savedSkillsStr) setSelectedSkills(JSON.parse(savedSkillsStr));
+    if (savedMinBackend) {
+      const value = Number(savedMinBackend);
+      if (Number.isFinite(value) && value >= 1) setMinBackendSubtasks(value);
+    }
+    if (savedMinFrontend) {
+      const value = Number(savedMinFrontend);
+      if (Number.isFinite(value) && value >= 1) setMinFrontendSubtasks(value);
+    }
   }, []);
 
   const getAuthToken = () => {
@@ -96,6 +108,8 @@ export default function AutonomousDevDashboard() {
         body: JSON.stringify({
           story_id: storyId,
           skill_names: selectedSkills.map((skill: any) => skill.name),
+          min_backend_subtasks: minBackendSubtasks,
+          min_frontend_subtasks: minFrontendSubtasks,
         })
       });
       if (res.ok) {
@@ -219,6 +233,66 @@ export default function AutonomousDevDashboard() {
               {selectedSkills.length > 0 ? selectedSkills.map((s: any) => s.name).join(', ') : 'Agent Skills'}
             </span>
           </button>
+          <div className="flex items-center gap-3 text-xs text-slate-200">
+            <label className="flex items-center gap-1">
+              <span
+                className="text-slate-200 font-semibold"
+                title="Minimum number of backend JIRA subtasks required. The pipeline will retry or stop early if fewer backend subtasks are generated."
+              >
+                Min Jira backend subtasks
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={Number.isFinite(minBackendSubtasks) && minBackendSubtasks >= 1 ? minBackendSubtasks : 4}
+                placeholder="4"
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === '') {
+                    setMinBackendSubtasks(4);
+                    localStorage.setItem('minBackendSubtasks', '4');
+                    return;
+                  }
+                  const value = Number(raw);
+                  if (Number.isFinite(value) && value >= 1) {
+                    setMinBackendSubtasks(value);
+                    localStorage.setItem('minBackendSubtasks', String(value));
+                  }
+                }}
+                className="w-16 px-2 py-1 rounded-md bg-slate-200 border border-slate-300 text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </label>
+            <label className="flex items-center gap-1">
+              <span
+                className="text-slate-200 font-semibold"
+                title="Minimum number of frontend JIRA subtasks required. The pipeline will retry or stop early if fewer frontend subtasks are generated."
+              >
+                Min Jira frontend subtasks
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={20}
+                value={Number.isFinite(minFrontendSubtasks) && minFrontendSubtasks >= 1 ? minFrontendSubtasks : 3}
+                placeholder="3"
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  if (raw === '') {
+                    setMinFrontendSubtasks(3);
+                    localStorage.setItem('minFrontendSubtasks', '3');
+                    return;
+                  }
+                  const value = Number(raw);
+                  if (Number.isFinite(value) && value >= 1) {
+                    setMinFrontendSubtasks(value);
+                    localStorage.setItem('minFrontendSubtasks', String(value));
+                  }
+                }}
+                className="w-16 px-2 py-1 rounded-md bg-slate-200 border border-slate-300 text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </label>
+          </div>
         </div>
       </header>
 
