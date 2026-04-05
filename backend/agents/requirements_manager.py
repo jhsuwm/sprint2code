@@ -133,6 +133,8 @@ class RequirementsManager:
                     f"  SUBTASK: <short title>\n"
                     f"  Desc: <implementation details>\n"
                     f"  ---\n"
+                    f"- Prefix every subtask title with a domain tag: [Backend], [Frontend], or [Fullstack].\n"
+                    f"- Use [Fullstack] only when the task truly spans both backend and frontend.\n"
                     f"- Cover backend and frontend completely when both skills are present.\n"
                     f"- Ensure EVERY PRD REQUIREMENT is covered by at least one subtask.\n"
                     f"- Keep each subtask focused and implementation-ready.\n"
@@ -207,6 +209,8 @@ class RequirementsManager:
             recovery_hint = (
                 "\n\nCRITICAL OUTPUT REQUIREMENT:\n"
                 "- Add explicit frontend and backend subtasks to meet required minimum counts.\n"
+                "- Prefix every subtask title with [Backend], [Frontend], or [Fullstack].\n"
+                "- Use [Fullstack] only when the task truly spans both backend and frontend.\n"
                 "- Ensure EVERY PRD REQUIREMENT is covered by at least one subtask.\n"
                 + "".join([f"- Ensure at least {label}.\n" for label in domain_deficit])
             )
@@ -540,12 +544,14 @@ class RequirementsManager:
         if technical_config.get("backend"):
             backend_keywords = ["backend", "fastapi", "api", "route", "service", "model", "database", "python"]
             summary_has_backend = any(keyword in summary_text for keyword in backend_keywords)
+            summary_has_backend = summary_has_backend or any(self._extract_domain_tag(st.get("summary", "")) in ("backend", "fullstack") for st in (parsed_subtasks or []))
             if not summary_has_backend and not any(keyword in plan_text for keyword in backend_keywords):
                 missing.append("backend")
 
         if technical_config.get("frontend"):
             frontend_keywords = ["frontend", "next.js", "nextjs", "react", "ui", "component", "page", "typescript"]
             summary_has_frontend = any(keyword in summary_text for keyword in frontend_keywords)
+            summary_has_frontend = summary_has_frontend or any(self._extract_domain_tag(st.get("summary", "")) in ("frontend", "fullstack") for st in (parsed_subtasks or []))
             if not summary_has_frontend and not any(keyword in plan_text for keyword in frontend_keywords):
                 missing.append("frontend")
 
@@ -602,14 +608,42 @@ class RequirementsManager:
                 count += 1
         return count
 
+    def _extract_domain_tag(self, summary: str) -> str:
+        lowered = (summary or '').lower()
+        if '[backend]' in lowered:
+            return 'backend'
+        if '[frontend]' in lowered:
+            return 'frontend'
+        if '[fullstack]' in lowered:
+            return 'fullstack'
+        return ''
+
+    def _infer_domain_from_keywords(self, keywords: List[str]) -> str:
+        lowered = [k.lower() for k in (keywords or [])]
+        if 'backend' in lowered:
+            return 'backend'
+        if 'frontend' in lowered:
+            return 'frontend'
+        return ''
+
+
     def _has_domain_subtask(self, subtasks: List[Dict[str, str]], keywords: List[str]) -> bool:
-        """Return True if any subtask summary/description contains any keyword."""
+        """Return True if any subtask summary/description contains any keyword or explicit domain tag."""
         if not subtasks:
             return False
         lowered_keywords = [k.lower() for k in keywords]
+        domain = self._infer_domain_from_keywords(keywords)
         for st in subtasks:
-            summary = (st.get("summary", "") or "").lower()
-            desc = (st.get("description", "") or "").lower()
+            summary_raw = (st.get("summary", "") or "")
+            desc_raw = (st.get("description", "") or "")
+            tag = self._extract_domain_tag(summary_raw)
+            if domain and tag:
+                if tag == domain or tag == "fullstack":
+                    return True
+                if tag in ("backend", "frontend"):
+                    continue
+            summary = summary_raw.lower()
+            desc = desc_raw.lower()
             if any(k in summary for k in lowered_keywords):
                 return True
             if any(k in desc for k in lowered_keywords):
@@ -620,10 +654,20 @@ class RequirementsManager:
         if not subtasks:
             return 0
         lowered_keywords = [k.lower() for k in keywords]
+        domain = self._infer_domain_from_keywords(keywords)
         count = 0
         for st in subtasks:
-            summary = (st.get("summary", "") or "").lower()
-            desc = (st.get("description", "") or "").lower()
+            summary_raw = (st.get("summary", "") or "")
+            desc_raw = (st.get("description", "") or "")
+            tag = self._extract_domain_tag(summary_raw)
+            if domain and tag:
+                if tag == domain or tag == "fullstack":
+                    count += 1
+                else:
+                    continue
+                continue
+            summary = summary_raw.lower()
+            desc = desc_raw.lower()
             if any(k in summary for k in lowered_keywords) or any(k in desc for k in lowered_keywords):
                 count += 1
         return count
@@ -708,13 +752,13 @@ class RequirementsManager:
 
         if has_backend and not self._has_domain_subtask(merged, backend_keywords):
             add(
-                "Backend API foundations",
+                "[Backend] Backend API foundations",
                 f"Implement backend API routes, services, and models for: {focus_text}.",
             )
 
         if has_frontend and not self._has_domain_subtask(merged, frontend_keywords):
             add(
-                "Frontend UI foundations",
+                "[Frontend] Frontend UI foundations",
                 f"Build Next.js pages/components and UI flows for: {focus_text}.",
             )
 
@@ -749,45 +793,45 @@ class RequirementsManager:
 
         if has_backend:
             add(
-                "Backend foundation and dependencies",
+                "[Backend] Backend foundation and dependencies",
                 "Setup FastAPI backend project structure, configuration, environment variables, and required dependencies aligned to selected backend skill standards.",
             )
             add(
-                "Backend domain models and persistence",
+                "[Backend] Backend domain models and persistence",
                 f"Implement backend data models/schemas and persistence layer for: {focus_text}. Ensure validation and serialization are consistent.",
             )
             add(
-                "Backend services and business logic",
+                "[Backend] Backend services and business logic",
                 "Implement service layer, business rules, and reusable domain operations required by the PRD.",
             )
             add(
-                "Backend API routes and request contracts",
+                "[Backend] Backend API routes and request contracts",
                 "Implement API endpoints, request/response contracts, and error handling for all required backend flows.",
             )
 
         if has_frontend:
             add(
-                "Frontend foundation and configuration",
+                "[Frontend] Frontend foundation and configuration",
                 "Setup Next.js/TypeScript frontend configuration, build tooling, and shared project scaffolding aligned to selected frontend skill standards.",
             )
             add(
-                "Frontend shared types and API client integration",
+                "[Frontend] Frontend shared types and API client integration",
                 "Implement shared frontend types and API client modules matching backend contracts.",
             )
             add(
-                "Frontend pages and reusable components",
+                "[Frontend] Frontend pages and reusable components",
                 f"Build pages/components for primary product journeys from PRD: {focus_text}.",
             )
 
         if has_backend and has_frontend:
             add(
-                "Frontend-backend integration",
+                "[Fullstack] Frontend-backend integration",
                 "Integrate frontend flows with backend endpoints, including loading/error states, data mapping, and contract validation.",
             )
 
         if has_full or (has_backend and has_frontend):
             add(
-                "Quality gates and validation",
+                "[Fullstack] Quality gates and validation",
                 "Add static analysis checks, lint/type checks, and validation tasks to ensure generated code starts successfully without unresolved errors.",
             )
 

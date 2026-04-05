@@ -472,6 +472,11 @@ SUBTASK: 2. [Next task title]
 Desc: [Detailed description]
 ---
 
+IMPORTANT: Prefix EVERY subtask title with a domain tag:
+- [Backend] for backend-only work
+- [Frontend] for frontend-only work
+- [Fullstack] only when the task truly requires both backend and frontend
+
 🎯 GOLDEN RULE: Group related functionality together. Dependencies BEFORE Dependents.
 🚨 CRITICAL OUTPUT REQUIREMENT:
 - Produce at least 8 subtasks for full-stack requirements; at least 5 for single-stack requirements.

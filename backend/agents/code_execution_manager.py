@@ -237,6 +237,13 @@ class CodeExecutionManager:
 
     async def _determine_task_type_ai(self, summary: str, description: str) -> str:
         """Use AI to determine the task type (frontend, backend, or fullstack)."""
+        summary_lower = (summary or "").lower()
+        if "[backend]" in summary_lower:
+            return "backend"
+        if "[frontend]" in summary_lower:
+            return "frontend"
+        if "[fullstack]" in summary_lower:
+            return "fullstack"
         prompt = f"""
         Analyze the following JIRA subtask and categorize it into one of these three types:
         1. frontend (Next.js, React, UI, Styling, CSS, Components, Pages)
