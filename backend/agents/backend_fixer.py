@@ -297,6 +297,157 @@ class BackendFixer:
         self.fixer._safe_log(job_id, f"🧹 Orchestrator: Removed relative imports in entrypoint {file_path}", "Programmatic Fix")
         return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
 
+    async def _fix_pip_dependency_conflict(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Resolve pip dependency conflicts by unpinning conflicting packages.
+
+        When pip reports ResolutionImpossible conflicts (e.g. google-cloud-firestore==2.16.0
+        conflicts with firebase-admin), the fix is to remove the version pin so pip can
+        find a compatible set of versions automatically.
+        """
+        if not file_path.endswith("requirements.txt"):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        original_content = file_info.get('content', '')
+        if not original_content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                original_content = f.read()
+        if not original_content:
+            return False
+
+        # Extract package names from conflict errors
+        conflict_packages = set()
+        for item in file_info.get('missing', []):
+            item_s = str(item)
+            # Match: "Pip dependency conflict in 'requirements.txt': 'google-cloud-firestore==2.16.0' conflicts..."
+            m = re.search(r"'([a-zA-Z0-9_-]+)==([0-9][0-9.]*)'", item_s)
+            if m:
+                conflict_packages.add(m.group(1).lower())
+            # Match: "unpin or downgrade 'google-cloud-firestore' to resolve"
+            m2 = re.search(r"unpin or downgrade '([a-zA-Z0-9_-]+)'", item_s)
+            if m2:
+                conflict_packages.add(m2.group(1).lower())
+
+        if not conflict_packages:
+            return False
+
+        content = original_content
+        modified = False
+        unpinned = []
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            pkg_base = re.split(r'[<>=!]', stripped, maxsplit=1)[0].strip().lower()
+            if pkg_base in conflict_packages:
+                # Replace pinned version with unpinned name
+                clean_line = pkg_base
+                content = content.replace(line, clean_line, 1)
+                unpinned.append(stripped)
+                modified = True
+
+        if not modified:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self.fixer._safe_log(
+            job_id,
+            f"🧹 Unpinned conflicting packages to resolve pip dependency conflicts: {unpinned}",
+            "Pip Conflict Resolution"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_python_unterminated_triple_quote(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix unterminated triple-quoted string/f-string literals.
+
+        AI frequently generates multi-line f-strings (e.g. email templates) that
+        are missing the closing triple-quote. This method finds the unclosed
+        opening delimiter and appends the matching closing delimiter.
+        """
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+        lines = content.splitlines()
+
+        # Scan for unterminated triple-quoted strings by tracking open/close state
+        for quote_type in ('"""', "'''"):
+            f_prefixes = ('f"""', "f'''", 'F"""', "F'''")
+            in_triple = False
+            is_fstring = False
+
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped.startswith('#'):
+                    continue
+
+                if not in_triple:
+                    for fp in f_prefixes:
+                        if fp in line:
+                            in_triple = True
+                            is_fstring = True
+                            break
+                    if not in_triple:
+                        idx = line.find(quote_type)
+                        if idx != -1:
+                            rest = line[idx + 3:]
+                            if quote_type not in rest:
+                                in_triple = True
+                                is_fstring = False
+                else:
+                    if quote_type in line:
+                        in_triple = False
+
+            if in_triple:
+                last_line = lines[-1]
+                if not last_line.rstrip().endswith(quote_type):
+                    lines[-1] = last_line.rstrip() + '\n' + quote_type
+                    content = '\n'.join(lines)
+
+        if content == original:
+            try:
+                compile(content, local, 'exec')
+            except SyntaxError as e:
+                error_msg = str(e.msg) if e.msg else ''
+                if 'unterminated triple-quoted' in error_msg.lower() and e.lineno:
+                    lines = content.splitlines()
+                    last_line = lines[-1] if lines else ''
+                    if not last_line.rstrip().endswith(('"""', "'''")):
+                        lines.append('"""')
+                        content = '\n'.join(lines)
+
+        if content == original:
+            return False
+
+        try:
+            compile(content, local, 'exec')
+        except SyntaxError:
+            self.fixer._safe_log(
+                job_id,
+                f"❌ Triple-quote fix didn't resolve syntax error in {file_path}",
+                "Programmatic Fix",
+                level="WARNING"
+            )
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self.fixer._safe_log(
+            job_id,
+            f"🧹 Closed unterminated triple-quoted string in {file_path}",
+            "Programmatic Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
     async def _fix_python_syntax_artifacts(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
         local = os.path.join(repo_dir, file_path)
         content = file_info.get('content', '')

@@ -29,6 +29,9 @@ class AutoFixWorker:
         # Validation cache is intentionally disabled for pass decisions.
         # File-level pass/fail can change as other files change in the same cycle.
         self._validation_cache = {}
+        
+        # Track consecutive regression attempts per file to break infinite loops
+        self._regression_counts = {}  # (job_id, file_path) -> int
     
     def _log(self, job_id: str, message: str, category: str = "Worker"):
         """
@@ -258,6 +261,21 @@ class AutoFixWorker:
                         if is_perfect_fix or is_net_improvement:
                             # Guardrail: avoid committing changes that increase total static-analysis errors.
                             if len(all_errors) > baseline_error_count:
+                                # Track consecutive regressions for stall breaking
+                                reg_key = (job_id, file_path)
+                                self._regression_counts[reg_key] = self._regression_counts.get(reg_key, 0) + 1
+                                reg_count = self._regression_counts[reg_key]
+
+                                if reg_count >= 3:
+                                    # Stall breaker: file consistently causes regression across 3+ attempts
+                                    self._log(
+                                        job_id,
+                                        f"🛑 Worker {self.worker_id}: Skipping {file_path} — caused regression {reg_count} times consecutively. Marking as unfixable.",
+                                        f"Worker {self.worker_id}"
+                                    )
+                                    self._restore_snapshot(repo_dir, snapshot)
+                                    return {'success': False, 'file_path': file_path, 'attempts': attempt, 'reason': 'persistent_regression'}
+
                                 if attempt < max_attempts:
                                     self._log(
                                         job_id,
@@ -280,6 +298,9 @@ class AutoFixWorker:
                                     continue
 
                             # SUCCESS - commit
+                            # Reset regression counter on success
+                            self._regression_counts.pop((job_id, file_path), None)
+
                             if is_perfect_fix:
                                 self._log(job_id, f"✅ Worker {self.worker_id}: Validation passed for {file_path} - committing...", f"Worker {self.worker_id}")
                             else:

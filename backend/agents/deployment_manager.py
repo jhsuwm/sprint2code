@@ -133,7 +133,7 @@ class DeploymentManager:
                     return
 
                 # 4. Start app locally with runtime-recovery loop
-                startup_retries = int(os.getenv('STARTUP_RECOVERY_RETRIES', '2'))
+                startup_retries = int(os.getenv('STARTUP_RECOVERY_RETRIES', '3'))
                 startup_timeout_sec = int(os.getenv('LOCAL_START_TIMEOUT_SEC', '600'))
                 startup_failure_message = ""
 
@@ -377,6 +377,7 @@ class DeploymentManager:
         baseline_initialized = False
         initial_error_count = len(all_errors)
         lowest_error_count = initial_error_count
+        best_commit_shas = {}  # repo_name -> commit SHA at best result
         attempt = 0
         consecutive_no_change = 0
         consecutive_same_errors = 0
@@ -569,6 +570,19 @@ class DeploymentManager:
                 reduction = current_error_count - new_error_count
                 consecutive_regressions = 0
                 self.job_manager.log(job_id, f"📉 Progress: {reduction} error(s) fixed ({new_error_count} remaining, best: {lowest_error_count})", "Auto-Fix Improving")
+
+                # Capture the current commit SHA for each repo so we can restore this state later
+                for repo_name in os.listdir(repo_dir):
+                    repo_path = os.path.join(repo_dir, repo_name)
+                    if os.path.isdir(repo_path) and os.path.isdir(os.path.join(repo_path, '.git')):
+                        try:
+                            sha = subprocess.check_output(
+                                ['git', 'rev-parse', 'HEAD'],
+                                cwd=repo_path, text=True
+                            ).strip()
+                            best_commit_shas[repo_name] = sha
+                        except Exception:
+                            pass
                 
                 if lowest_error_count <= 3:
                     self.job_manager.log(job_id, f"🎯 Excellent result achieved ({lowest_error_count} errors). Being conservative - will stop if any regression occurs.", "Near Success")
@@ -695,8 +709,46 @@ class DeploymentManager:
             initial_error_count = max(initial_error_count, final_count)
             lowest_error_count = min(lowest_error_count, final_count)
         
-        # If final result is worse than best achieved, report it; do not pretend success.
-        if final_count > lowest_error_count:
+        # If final result is worse than best achieved, restore the best state
+        if final_count > lowest_error_count and best_commit_shas:
+            best_success_rate = ((initial_error_count - lowest_error_count) / initial_error_count * 100) if initial_error_count > 0 else 0
+            self.job_manager.log(
+                job_id,
+                f"🔄 Restoring best state ({lowest_error_count} errors, {best_success_rate:.1f}% improvement) from cycle {last_significant_progress_cycle}",
+                "Restore Best State",
+            )
+            for repo_name, sha in best_commit_shas.items():
+                repo_path = os.path.join(repo_dir, repo_name)
+                if os.path.isdir(repo_path) and os.path.isdir(os.path.join(repo_path, '.git')):
+                    try:
+                        subprocess.check_call(
+                            ['git', 'reset', '--hard', sha],
+                            cwd=repo_path,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
+                        )
+                        self.job_manager.log(
+                            job_id,
+                            f"✅ Restored {repo_name} to commit {sha[:8]} (best state with {lowest_error_count} errors)",
+                            "Restore Best State",
+                        )
+                    except Exception as e:
+                        self.job_manager.log(
+                            job_id,
+                            f"⚠️ Failed to restore {repo_name} to {sha[:8]}: {e}",
+                            "Restore Best State",
+                            level="WARNING",
+                        )
+            # Re-validate after restore
+            validator = DeploymentValidator()
+            all_errors = validator.validate_all(repo_dir)
+            final_count = len(all_errors)
+            self.job_manager.log(
+                job_id,
+                f"📊 After restore: {final_count} errors",
+                "Restore Best State",
+            )
+        elif final_count > lowest_error_count:
             best_success_rate = ((initial_error_count - lowest_error_count) / initial_error_count * 100) if initial_error_count > 0 else 0
             self.job_manager.log(
                 job_id,
@@ -1122,6 +1174,34 @@ class DeploymentManager:
             if re.search(r"\bazure\b", combined, re.IGNORECASE):
                 errors.append("Invalid pip requirement in 'requirements.txt': 'azure'")
                 errors.append("Missing dependency: 'azure-storage-blob' in requirements.txt")
+
+        # pip dependency resolution conflicts (ResolutionImpossible):
+        # "ERROR: Cannot install -r requirements.txt (line 6) and google-cloud-firestore==2.16.0
+        #  because these package versions have conflicting dependencies."
+        conflict_matches = re.findall(
+            r"Cannot install.*?and\s+([^\s]+==[^\s]+)\s+because.*?conflicting",
+            combined,
+            re.IGNORECASE
+        )
+        for conflict_pkg in conflict_matches:
+            pkg_name = conflict_pkg.strip().split("==")[0]
+            errors.append(
+                f"Pip dependency conflict in 'requirements.txt': "
+                f"'{conflict_pkg}' conflicts with other packages - "
+                f"unpin or downgrade '{pkg_name}' to resolve"
+            )
+
+        # Also catch the broader "ResolutionImpossible" marker.
+        if "ResolutionImpossible" in combined:
+            # Extract any pinned packages mentioned in conflict messages.
+            pinned = re.findall(r"([a-zA-Z0-9_-]+)==([0-9][0-9.]+)", combined)
+            if pinned:
+                for pkg, ver in pinned:
+                    err_text = f"Pip dependency conflict in 'requirements.txt': '{pkg}=={ver}' is part of a resolution conflict - unpin to allow pip to find compatible versions"
+                    if err_text not in errors:
+                        errors.append(err_text)
+            elif not any("Pip dependency conflict" in e for e in errors):
+                errors.append("Runtime pip install failure in requirements.txt")
 
         # Runtime undefined symbol errors (NameError) from backend startup traceback.
         name_error = re.search(r"NameError:\s*name ['\"]([^'\"]+)['\"] is not defined", combined)

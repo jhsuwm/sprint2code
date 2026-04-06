@@ -5,6 +5,10 @@
 
 set -e
 
+echo "Cleaning up previous deployment files ..."
+rm -fr ./backend/deployments/*
+echo ""
+
 echo "🚀 Starting Sprint2Code"
 echo "=================================="
 echo ""

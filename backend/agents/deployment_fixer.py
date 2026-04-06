@@ -37,6 +37,7 @@ class DeploymentFixer:
         self._unfixable_files = {}  # Files that made things worse or showed no progress
         self._resurrection_count = {}  # Track how many times each file has been resurrected
         self._invalid_npm_packages = set()  # Track invalid npm packages reported by ETARGET
+        self._path_mismatch_count = {}  # Track consecutive path mismatches per file (stall breaker)
     
     def _safe_log(self, job_id: str, message: str, category: str = "Fix", level: str = "INFO"):
         """
@@ -97,10 +98,20 @@ class DeploymentFixer:
         return False
 
     def _paths_match(self, candidate_path: str, target_path: str) -> bool:
-        """Check whether candidate and target refer to the same repo-relative file."""
+        """Check whether candidate and target refer to the same repo-relative file.
+
+        Handles .ts↔.tsx and .js↔.jsx extension mismatches — AI frequently swaps these.
+        """
         c = self._normalize_repo_relative_path(candidate_path)
         t = self._normalize_repo_relative_path(target_path)
-        return c == t or c.endswith(f"/{t}") or t.endswith(f"/{c}")
+        if c == t or c.endswith(f"/{t}") or t.endswith(f"/{c}"):
+            return True
+        # Handle .ts ↔ .tsx and .js ↔ .jsx extension swaps
+        c_key = self._canonical_path_key(c)
+        t_key = self._canonical_path_key(t)
+        if c_key and t_key and (c_key == t_key or c_key.endswith(f"/{t_key}") or t_key.endswith(f"/{c_key}")):
+            return True
+        return False
 
     def _canonical_path_key(self, path: str) -> str:
         """Create comparable module/file key across alias, extension, and prefix variants."""
@@ -966,17 +977,58 @@ class DeploymentFixer:
                     full_path = self._coerce_generated_path(raw_path, target_file, repo_dir)
                     if raw_path and self._paths_match(full_path, target_file):
                         target_content = parsed[0].get('content')
-                    else:
+                    elif raw_path and self._canonical_path_key(full_path) == self._canonical_path_key(target_file):
+                        # Canonical keys match — extension swap (.ts↔.tsx, .js↔.jsx) is acceptable.
+                        # Accept the content but write it to the original target path.
+                        target_content = parsed[0].get('content')
                         self._safe_log(
                             job_id,
-                            f"⚠️ AI output block path mismatch for {target_file} (got '{raw_path}'). Discarding.",
-                            "Parse Mismatch",
+                            f"⚠️ AI output path '{raw_path}' differs from target '{target_file}' by extension only — accepting with original path.",
+                            "Parse Mismatch Recovery",
                             level="WARNING"
                         )
-                        return None
+                    else:
+                        # Track consecutive path mismatches for stall breaking
+                        if job_id not in self._path_mismatch_count:
+                            self._path_mismatch_count[job_id] = {}
+                        self._path_mismatch_count[job_id][target_file] = self._path_mismatch_count[job_id].get(target_file, 0) + 1
+                        mismatch_count = self._path_mismatch_count[job_id][target_file]
+                        
+                        if mismatch_count >= 3:
+                            # Stall breaker: after 3 consecutive path mismatches, try accepting the content
+                            # anyway since the AI is clearly generating valid code for the right file
+                            self._safe_log(
+                                job_id,
+                                f"⚠️ Stall breaker: {target_file} had {mismatch_count} path mismatches. Accepting content from '{raw_path}'.",
+                                "Stall Breaker",
+                                level="WARNING"
+                            )
+                            target_content = parsed[0].get('content')
+                        else:
+                            self._safe_log(
+                                job_id,
+                                f"⚠️ AI output block path mismatch for {target_file} (got '{raw_path}'). Discarding.",
+                                "Parse Mismatch",
+                                level="WARNING"
+                            )
+                            return None
                 else:
-                    self._safe_log(job_id, f"⚠️ AI output missing target file block for {target_file}", "Parse Mismatch", level="WARNING")
-                    return None
+                    # Multi-file output: try to find a matching file by canonical key
+                    for pf in parsed:
+                        pf_raw = pf.get('file_path', '')
+                        pf_full = self._coerce_generated_path(pf_raw, target_file, repo_dir)
+                        if self._canonical_path_key(pf_full) == self._canonical_path_key(target_file):
+                            target_content = pf.get('content')
+                            self._safe_log(
+                                job_id,
+                                f"⚠️ AI output path '{pf_raw}' differs from target '{target_file}' — accepted by canonical key match.",
+                                "Parse Mismatch Recovery",
+                                level="WARNING"
+                            )
+                            break
+                    if target_content is None:
+                        self._safe_log(job_id, f"⚠️ AI output missing target file block for {target_file}", "Parse Mismatch", level="WARNING")
+                        return None
 
             deduped_related = []
             seen = set()
@@ -1451,6 +1503,15 @@ class DeploymentFixer:
         prompt += "- Importing something that doesn't exist in the source file (still fails)\n"
         prompt += "- Changing error type without fixing the underlying issue (still fails)\n\n"
 
+        # Python-specific: warn about unterminated triple-quoted strings
+        if file_path.endswith('.py') and info.get('missing'):
+            missing_str = ' '.join(str(m) for m in info['missing'])
+            if 'unterminated triple-quoted' in missing_str.lower():
+                prompt += "🚨 CRITICAL: The current file has an unterminated triple-quoted string (f-string or regular).\n"
+                prompt += "Every `f\"\"\"` or `\"\"\"` opening MUST have a matching closing `\"\"\"`.\n"
+                prompt += "The string is cut off before it ends — add the closing `\"\"\"` at the end of the string content.\n"
+                prompt += "Do NOT remove the multi-line string — COMPLETE it properly.\n\n"
+
         if file_path.endswith("requirements.txt"):
             prompt += "### REQUIREMENTS.TXT RULES ###\n"
             prompt += "- NEVER remove existing dependencies unless an error explicitly says the package is invalid.\n"
@@ -1487,7 +1548,10 @@ class DeploymentFixer:
         prompt += "COMPLETE_FIX: <Exact changes that will eliminate ALL errors listed above>\n"
         prompt += "VERIFICATION: <How you verified ALL errors will be gone after this fix>\n\n"
         prompt += f"FILE_PATH: {output_file_path}\n---\n[COMPLETE ERROR-FREE CODE]\n---\n"
-        prompt += "🚨 STRICT REQUIREMENT: Output ONLY the file above. Do NOT output any other FILE_PATH blocks.\n"
+        prompt += f"🚨 CRITICAL: The FILE_PATH in your output MUST be EXACTLY: {output_file_path}\n"
+        prompt += f"   - Do NOT change the file extension (e.g., .ts vs .tsx, .js vs .jsx)\n"
+        prompt += f"   - Do NOT add any path prefixes like 'backend/' or 'frontend/'\n"
+        prompt += f"   - Do NOT output any other FILE_PATH blocks\n"
         return prompt
     
     def _parse_all_errors(self, errors: List[str], repo_dir: str) -> Dict[str, Dict]:
@@ -1758,12 +1822,48 @@ class DeploymentFixer:
                     'celery', 'requests', 'httpx', 'aiohttp', 'boto3', 'stripe',
                     'flask', 'django', 'numpy', 'pandas', 'scipy', 'sklearn',
                     'tensorflow', 'torch', 'keras', 'passlib', 'pytest', 'bson', 'pyjwt',
-                    'click', 'jinja2', 'email_validator'
+                    'click', 'jinja2', 'email_validator',
+                    # FastAPI ecosystem
+                    'starlette', 'loguru', 'prometheus_client', 'prometheus_fastapi_instrumentor',
+                    'aiofiles', 'motor', 'pymongo', 'elasticsearch', 'httpcore',
+                    'anyio', 'sniffio', 'h11', 'httptools', 'watchfiles',
+                    'pydantic_core', 'annotated_types', 'typing_extensions',
+                    'pydantic_settings', 'python_dotenv', 'dotenv',
+                    'python_jose', 'python_multipart', 'itsdangerous',
+                    'cryptography', 'certifi', 'charset_normalizer', 'idna', 'urllib3',
+                    'six', 'markupsafe', 'werkzeug', 'gunicorn', 'waitress',
+                    'orjson', 'ujson', 'msgpack', 'protobuf', 'grpc',
+                    'opentelemetry', 'sentry_sdk', 'newrelic', 'datadog',
+                    # Common AWS/GCP/Azure SDKs
+                    'azure', 'azure_core', 'azure_storage', 'azure_identity',
+                    'boto', 'botocore', 's3transfer', 'jmespath',
+                    'google_auth', 'google_api', 'google_cloud', 'google_api_core',
+                    # Testing & dev
+                    'black', 'flake8', 'mypy', 'isort', 'pylint', 'coverage',
+                    'factory_boy', 'faker', 'responses', 'aioresponses',
                 }
+                # Dynamic check: if the module is already in requirements.txt, treat as package
+                req_path = os.path.join(repo_dir, backend_prefix, 'requirements.txt') if backend_prefix else os.path.join(repo_dir, 'requirements.txt')
+                installed_packages = set()
+                if os.path.exists(req_path):
+                    try:
+                        with open(req_path, 'r') as _rf:
+                            for _line in _rf:
+                                _line = _line.strip()
+                                if not _line or _line.startswith('#'):
+                                    continue
+                                _pkg = re.split(r'[<>=!]', _line)[0].split('[')[0].strip().lower()
+                                if _pkg:
+                                    installed_packages.add(_pkg)
+                    except Exception:
+                        pass
+
                 is_package = (
                     '/' not in module_trying_to_import and
                     not module_trying_to_import.startswith(('.', '@')) and
-                    top_module in third_party_roots
+                    (top_module in third_party_roots or
+                     top_module.lower() in installed_packages or
+                     module_trying_to_import.lower() in installed_packages)
                 )
                 
                 if is_package:
@@ -2456,6 +2556,9 @@ class DeploymentFixer:
             if any("Expression expected" in err or "Unterminated regular expression literal" in err for err in missing_items):
                 return True
             return len(file_content) < 500
+        # AI artifact-only .ts/.tsx files (e.g. content is just '---')
+        if file_path.endswith(('.ts', '.tsx')) and any("Expression expected" in err for err in missing_items):
+            return True
         # NEW: Try programmatic fix for files with "from backend.X" errors
         if file_path.endswith('.py') and any('backend.' in err for err in missing_items):
             return True
@@ -2480,6 +2583,11 @@ class DeploymentFixer:
         """Apply programmatic fixes"""
         try:
             if file_path.endswith('requirements.txt'):
+                # Try dependency conflict resolution first (unpin conflicting packages)
+                if any('Pip dependency conflict' in str(err) for err in file_info.get('missing', [])):
+                    conflict_result = await self.backend_fixer._fix_pip_dependency_conflict(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+                    if conflict_result:
+                        return conflict_result
                 return await self.backend_fixer._fix_requirements(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif file_path.endswith('package.json'):
                 return await self.frontend_fixer._fix_package_json(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
@@ -2576,9 +2684,45 @@ class DeploymentFixer:
                 return await self.frontend_fixer._fix_missing_css_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             elif '/types/' in file_path and file_path.endswith('.ts'):
                 return await self.frontend_fixer._fix_type_file(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # AI artifact-only .ts/.tsx files (e.g. content is just '---')
+            elif file_path.endswith(('.ts', '.tsx')) and any('Expression expected' in str(err) for err in file_info.get('missing', [])):
+                return await self.frontend_fixer._fix_ts_artifact_content(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # react-icons JSX component type mismatch
+            elif file_path.endswith(('.tsx', '.jsx')) and any('cannot be used as a JSX component' in str(err) for err in file_info.get('missing', [])):
+                return await self.frontend_fixer._fix_react_icon_jsx_type(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Select options type missing disabled property
+            elif file_path.endswith(('.tsx', '.ts')) and any('disabled' in str(err) and 'not assignable' in str(err) for err in file_info.get('missing', [])):
+                return await self.frontend_fixer._fix_select_options_type(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Type union mismatches (literal not assignable to narrow type)
+            elif file_path.endswith(('.ts', '.tsx')) and any(
+                "is not assignable to type" in str(err) and (
+                    "'" in str(err).split("is not assignable to type")[0].split("Type")[-1] or
+                    any(lit in str(err) for lit in ("'all'", "'updatedAt'", "'asc'", "'desc'"))
+                )
+                for err in file_info.get('missing', [])
+            ):
+                union_fixed = await self.frontend_fixer._fix_ts_type_union_mismatch(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+                if union_fixed:
+                    return True
+                return await self.frontend_fixer._fix_ts_wrong_field_type(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Programmatic fix for "from backend.X" errors
             elif file_path.endswith('.py') and any('backend.' in str(err) for err in file_info.get('missing', [])):
                 return await self.backend_fixer._fix_backend_prefix(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Import case sensitivity mismatch
+            elif file_path.endswith(('.ts', '.tsx', '.js', '.jsx')) and any('only in casing' in str(err) for err in file_info.get('missing', [])):
+                return await self.frontend_fixer._fix_import_case_mismatch(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Import name mismatch (Did you mean)
+            elif file_path.endswith(('.ts', '.tsx', '.js', '.jsx')) and any(
+                'not found in' in str(err) or 'has no exported member' in str(err)
+                for err in file_info.get('missing', [])
+            ):
+                name_fixed = await self.frontend_fixer._fix_import_name_mismatch(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+                if name_fixed:
+                    return True
+                return await self.frontend_fixer._fix_ts_missing_exports(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
+            # Component prop contract mismatch (IntrinsicAttributes & XProps)
+            elif file_path.endswith(('.ts', '.tsx')) and any('IntrinsicAttributes' in str(err) and 'is not assignable to type' in str(err) for err in file_info.get('missing', [])):
+                return await self.frontend_fixer._fix_component_prop_mismatch(file_path, file_info, github_repo, github_branch, repo_dir, job_id)
             # NEW: Pydantic BaseSettings re-export fix (e.g., config.py with SECRET_KEY: str = ...)
             elif file_path.endswith('.py') and any("not found in '" in str(err) for err in file_info.get('missing', [])):
                 return await self.backend_fixer._fix_pydantic_settings_reexport(file_path, file_info, github_repo, github_branch, repo_dir, job_id)

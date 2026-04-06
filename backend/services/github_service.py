@@ -558,3 +558,25 @@ class GitHubService:
         except Exception as e:
             error(f"Error creating pull request: {e}")
             return None
+
+    def reset_to_commit(self, owner: str, repo: str, branch: str, sha: str) -> bool:
+        """Reset a branch to a previous commit SHA via the GitHub API.
+
+        Uses the Git References API to force-update the branch ref.
+        """
+        try:
+            url = f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{branch}"
+            payload = {
+                "sha": sha,
+                "force": True
+            }
+            response = requests.patch(url, headers=self.headers, json=payload)
+            if response.status_code == 200:
+                info(f"Reset {owner}/{repo}:{branch} to {sha}")
+                return True
+            else:
+                error(f"Failed to reset branch: {response.status_code} - {response.text}")
+                return False
+        except Exception as e:
+            error(f"Error resetting branch to commit: {e}")
+            return False

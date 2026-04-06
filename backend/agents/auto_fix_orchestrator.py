@@ -47,10 +47,16 @@ class AutoFixOrchestrator:
         # OPTIMIZATION A: Track programmatic fixes to avoid redundancy
         self._programmatic_fix_history = {}  # job_id -> set of successfully fixed files
 
+        # Track files that were programmatically fixed — exclude them from AI workers
+        # to prevent AI from overwriting programmatic fixes
+        self._programmatic_fix_lock = {}  # job_id -> set of file paths locked from AI
+
         # Track repeated worker failures to avoid infinite loops on stubborn files
         self._failed_file_signatures = {}  # job_id -> {file_path: {'signature': int, 'count': int}}
         # Track total cross-cycle attempts per file to bound churn.
         self._file_total_attempts = {}  # job_id -> {file_path: int}
+        # Track consecutive orchestrator cycles where a file fails with same signature
+        self._consecutive_fail_cycles = {}  # job_id -> {file_path: {'signature': int, 'cycles': int}}
     
     async def orchestrate_auto_fix(self, job_id: str, story_key: str, all_errors: List[str], 
                                    github_repo: str, github_branch: str, repo_dir: str) -> bool:
@@ -122,6 +128,10 @@ class AutoFixOrchestrator:
                         programmatic_fixed.append(file_path)
                         # OPTIMIZATION A: Mark as successfully fixed
                         self._programmatic_fix_history[job_id].add(file_path)
+                        # Lock this file from AI workers to prevent overwrite
+                        if job_id not in self._programmatic_fix_lock:
+                            self._programmatic_fix_lock[job_id] = set()
+                        self._programmatic_fix_lock[job_id].add(file_path)
                         del files_to_fix[file_path]
                     else:
                         self.job_manager.log(job_id, f"⚠️ Orchestrator: Programmatic fix failed for {file_path} (falling back to AI)", "Orchestrator", level="WARNING")
@@ -145,7 +155,21 @@ class AutoFixOrchestrator:
             # Skip files that repeatedly failed with the exact same error signature
             filtered_files_to_fix = {}
             max_file_cycles = int(os.getenv('AUTO_FIX_MAX_FILE_CYCLES', '12'))
+            max_consecutive_fail_cycles = int(os.getenv('AUTO_FIX_MAX_CONSECUTIVE_FAIL_CYCLES', '2'))
+
+            # Exclude files that were programmatically fixed — AI workers will overwrite them
+            prog_locked = self._programmatic_fix_lock.get(job_id, set())
+
             for file_path, file_info in files_to_fix.items():
+                # Skip files locked by programmatic fixes (AI would overwrite them)
+                if file_path in prog_locked:
+                    self.job_manager.log(
+                        job_id,
+                        f"🔒 Orchestrator: Skipping {file_path} (programmatically fixed — excluding from AI to prevent overwrite)",
+                        "Skip"
+                    )
+                    continue
+
                 total_attempts = self._file_total_attempts[job_id].get(file_path, 0)
                 if max_file_cycles > 0 and total_attempts >= max_file_cycles:
                     self.job_manager.log(
@@ -170,6 +194,17 @@ class AutoFixOrchestrator:
                         "Skip"
                     )
                     continue
+
+                # Early skip: file has failed with same signature across 2+ consecutive orchestrator cycles
+                if job_id in self._consecutive_fail_cycles:
+                    consec = self._consecutive_fail_cycles[job_id].get(file_path)
+                    if consec and consec.get('signature') == signature and consec.get('cycles', 0) >= max_consecutive_fail_cycles:
+                        self.job_manager.log(
+                            job_id,
+                            f"⏭️ Orchestrator: Skipping {file_path} (same error for {consec['cycles']} consecutive cycles — AI cannot resolve this)",
+                            "Skip"
+                        )
+                        continue
 
                 filtered_files_to_fix[file_path] = file_info
 
@@ -287,6 +322,7 @@ class AutoFixOrchestrator:
                 if file_path in successful_files:
                     self._failed_file_signatures[job_id].pop(file_path, None)
                     self._file_total_attempts[job_id][file_path] = 0
+                    self._consecutive_fail_cycles.get(job_id, {}).pop(file_path, None)
                     continue
 
                 failed_result = next((r for r in failed_worker_results if r.get('file_path') == file_path), None)
@@ -296,6 +332,15 @@ class AutoFixOrchestrator:
                         prev['count'] = prev.get('count', 0) + 1
                     else:
                         self._failed_file_signatures[job_id][file_path] = {'signature': signature, 'count': 1}
+
+                    # Track consecutive orchestrator cycles with same failure signature
+                    if job_id not in self._consecutive_fail_cycles:
+                        self._consecutive_fail_cycles[job_id] = {}
+                    consec = self._consecutive_fail_cycles[job_id].get(file_path)
+                    if consec and consec.get('signature') == signature:
+                        consec['cycles'] = consec.get('cycles', 0) + 1
+                    else:
+                        self._consecutive_fail_cycles[job_id][file_path] = {'signature': signature, 'cycles': 1}
                 else:
                     # File not attempted by worker in this cycle (e.g., programmatic only). Keep state unchanged.
                     pass

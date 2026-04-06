@@ -573,6 +573,40 @@ class FrontendFixer:
                 continue
             if re.search(rf"\bexport\s*\{{[^}}]*\b{re.escape(name)}\b[^}}]*\}}", content):
                 continue
+
+            # Check if a similar-named export already exists (e.g. getToken vs getAuthToken)
+            # Create an alias instead of an empty stub
+            all_exports = re.findall(r"\bexport\s+(?:async\s+)?(?:function|const|let|var|class)\s+(\w+)", content)
+            all_exports += re.findall(r"\bexport\s*\{([^}]+)\}", content)
+            alias_found = None
+            for existing in all_exports:
+                existing = existing.strip()
+                # Normalize both names for comparison
+                norm_missing = name.lower().replace('_', '')
+                norm_existing = existing.lower().replace('_', '')
+                # Check for common patterns: getToken/getAuthToken, removeToken/clearAuthToken
+                if norm_existing in norm_missing or norm_missing in norm_existing:
+                    # Verify it's a function/const that could be aliased
+                    if re.search(rf"\b(?:function|const|let|var)\s+{re.escape(existing)}\b", content):
+                        alias_found = existing
+                        break
+                # Also check prefix/suffix patterns: setToken -> setAuthToken
+                for prefix in ('get', 'set', 'clear', 'remove'):
+                    if norm_missing.startswith(prefix) and norm_existing.startswith(prefix):
+                        rest_missing = norm_missing[len(prefix):]
+                        rest_existing = norm_existing[len(prefix):]
+                        if rest_missing in rest_existing or rest_existing in rest_missing:
+                            if re.search(rf"\b(?:function|const|let|var)\s+{re.escape(existing)}\b", content):
+                                alias_found = existing
+                                break
+                if alias_found:
+                    break
+
+            if alias_found:
+                # Create an alias: export { existing as missing }
+                content = content.rstrip() + f"\n\nexport {{ {alias_found} as {name} }};\n"
+                continue
+
             if not content.endswith('\n'):
                 content += '\n'
             content += (
@@ -760,11 +794,14 @@ class FrontendFixer:
 
         def _guess_type(prop: str) -> str:
             prop_l = prop.lower()
+            # Array-suggesting names
+            if prop_l.endswith(('s', 'list', 'items', 'tickets', 'comments', 'attachments', 'users', 'files')):
+                return "any[]"
             if prop_l.startswith(("is_", "has_", "can_", "should_")) or prop_l in ("active", "enabled", "disabled", "verified"):
                 return "boolean"
-            if prop_l in ("count", "total", "size", "age"):
+            if prop_l in ("count", "total", "size", "age", "page", "limit", "totalpages", "totaltickets"):
                 return "number"
-            return "string"
+            return "unknown"
 
         prop_type = _guess_type(prop_name)
         prefixes = self.fixer._repo_prefixes(repo_dir)
@@ -1409,3 +1446,611 @@ class FrontendFixer:
                     return await self.fixer._commit_programmatic_fix(job_id, 'frontend/src/types/index.ts', new_index, github_repo, github_branch)
 
         return False
+
+    async def _fix_react_icon_jsx_type(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix react-icons JSX component type mismatch.
+
+        react-icons v5+ returns ReactNode but strict TSX typing expects
+        React.FC or React.ComponentType. This adds @ts-expect-error comments
+        before each icon usage to suppress the type error.
+        """
+        if not file_path.endswith(('.tsx', '.jsx')):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        original = content
+        lines = content.splitlines()
+
+        icon_names = set()
+        for item in file_info.get('missing', []):
+            item_s = str(item)
+            m = re.search(r"'(Fa\w+)' cannot be used as a JSX component", item_s)
+            if m:
+                icon_names.add(m.group(1))
+            m2 = re.search(r"'(\w+)' cannot be used as a JSX component", item_s)
+            if m2:
+                icon_names.add(m2.group(1))
+
+        if not icon_names:
+            return False
+
+        has_react_icons_import = any('react-icons' in line for line in lines if 'import' in line)
+        if not has_react_icons_import:
+            return False
+
+        modified = False
+        new_lines = []
+        for i, line in enumerate(lines):
+            for icon in icon_names:
+                if f'<{icon}' in line and i > 0 and '@ts-expect-error' not in (lines[i-1] if i > 0 else ''):
+                    indent = len(line) - len(line.lstrip())
+                    new_lines.append(' ' * indent + '{/* @ts-expect-error react-icons type compatibility */}')
+                    modified = True
+                    break
+            new_lines.append(line)
+
+        if not modified:
+            return False
+
+        content = '\n'.join(new_lines)
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self.fixer._safe_log(
+            job_id,
+            f"🧹 Added @ts-expect-error for react-icons JSX components in {file_path}",
+            "Programmatic Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)
+
+    async def _fix_select_options_type(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix Select component options type missing optional properties like disabled."""
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        has_disabled_error = any(
+            'disabled' in str(item) and 'not assignable' in str(item)
+            for item in file_info.get('missing', [])
+        )
+        if not has_disabled_error:
+            return False
+
+        # Search for Select/Input component in the codebase
+        components_dir = os.path.join(repo_dir, 'frontend', 'src', 'components')
+        if os.path.exists(components_dir):
+            for fname in os.listdir(components_dir):
+                if not fname.endswith(('.tsx', '.ts')):
+                    continue
+                fpath = os.path.join(components_dir, fname)
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    comp_content = f.read()
+
+                # Match options type definition: options: { value: string; label: string }[]
+                pattern = r'(\{\s*value:\s*string\s*;\s*label:\s*string\s*\})'
+                match = re.search(pattern, comp_content)
+                if match and 'disabled' not in match.group(1):
+                    old_type = match.group(1)
+                    new_type = '{ value: string; label: string; disabled?: boolean }'
+                    comp_content = comp_content.replace(old_type, new_type, 1)
+
+                    with open(fpath, 'w', encoding='utf-8') as f:
+                        f.write(comp_content)
+
+                    rel_path = f'frontend/src/components/{fname}'
+                    self.fixer._safe_log(
+                        job_id,
+                        f"🧹 Added disabled?: boolean to options type in {rel_path}",
+                        "Programmatic Fix"
+                    )
+                    return await self.fixer._commit_programmatic_fix(
+                        job_id, rel_path, comp_content, github_repo, github_branch
+                    )
+
+        return False
+
+    async def _fix_ts_artifact_content(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix .ts/.tsx files that contain only AI artifacts (e.g. '---').
+
+        Replaces artifact-only content with a minimal valid TypeScript stub.
+        """
+        if not file_path.endswith(('.ts', '.tsx')):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        stripped = content.strip()
+        if stripped not in ('---', '```', 'python', '') and len(content) > 20:
+            return False
+        if stripped not in ('---', '```', 'python', ''):
+            return False
+
+        module_name = file_path.replace('frontend/', '').replace('.ts', '').replace('.tsx', '')
+        is_imported = False
+        frontend_dir = os.path.join(repo_dir, 'frontend')
+        if os.path.exists(frontend_dir):
+            for root, dirs, files in os.walk(frontend_dir):
+                if 'node_modules' in root:
+                    continue
+                for fname in files:
+                    if not fname.endswith(('.ts', '.tsx')):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            fc = f.read()
+                        if module_name.split('/')[-1] in fc:
+                            is_imported = True
+                            break
+                    except Exception:
+                        pass
+                if is_imported:
+                    break
+
+        stub = '// Auto-generated stub (original content was AI artifact)\nexport {};\n'
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(stub)
+
+        self.fixer._safe_log(
+            job_id,
+            f"🧹 Replaced AI artifact content in {file_path} with valid TypeScript stub",
+            "Programmatic Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, stub, github_repo, github_branch)
+
+    async def _fix_ts_type_union_mismatch(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix type union mismatches where a literal value is not assignable to a narrow type.
+
+        E.g. status: 'all' not assignable to TicketStatus, or sortBy: 'updatedAt'
+        not assignable to 'createdAt' | 'lastUpdatedAt'. Expands the type union
+        to include the missing value.
+        """
+        if not file_path.endswith(('.ts', '.tsx')):
+            return False
+
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        # Match: Type '"all"' is not assignable to type 'TicketStatus | undefined'.
+        union_mismatches = []
+        for item in missing_items:
+            m = re.search(r"Type\s+'([^']+)'\s+is not assignable to type\s+'([^']+)'", item)
+            if m:
+                literal_val = m.group(1)
+                target_type = m.group(2)
+                # Skip non-literal mismatches (e.g. Type 'string' is not assignable to type 'Ticket[]')
+                if literal_val.startswith("'") or literal_val.startswith('"'):
+                    union_mismatches.append((literal_val.strip("'\""), target_type))
+
+        if not union_mismatches:
+            return False
+
+        # Find the type definition file and expand the union
+        prefixes = self.fixer._repo_prefixes(repo_dir)
+        frontend_prefix = prefixes["frontend"]
+        base_dir = os.path.join(repo_dir, frontend_prefix, "src", "types") if frontend_prefix else os.path.join(repo_dir, "src", "types")
+
+        modified_any = False
+        for literal_val, target_type in union_mismatches:
+            type_def_path = None
+            type_content = ""
+
+            # Search for the type definition
+            search_dirs = [base_dir]
+            if os.path.isdir(base_dir):
+                for root, _, files in os.walk(base_dir):
+                    for fname in files:
+                        if not fname.endswith('.ts'):
+                            continue
+                        fpath = os.path.join(root, fname)
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            fc = f.read()
+                        if target_type in fc:
+                            type_def_path = fpath
+                            type_content = fc
+                            break
+                    if type_def_path:
+                        break
+
+            if not type_def_path:
+                # Search the entire frontend
+                frontend_root = os.path.join(repo_dir, frontend_prefix) if frontend_prefix else repo_dir
+                for root, dirs, files in os.walk(frontend_root):
+                    if 'node_modules' in root:
+                        continue
+                    for fname in files:
+                        if not fname.endswith('.ts'):
+                            continue
+                        fpath = os.path.join(root, fname)
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            fc = f.read()
+                        if target_type in fc:
+                            type_def_path = fpath
+                            type_content = fc
+                            break
+                    if type_def_path:
+                        break
+
+            if not type_def_path:
+                continue
+
+            # Expand the type: find the property and add the literal value to its union
+            # Pattern: propName?: TypeName  →  propName?: TypeName | 'literal'
+            # Pattern: propName?: 'a' | 'b'  →  propName?: 'a' | 'b' | 'literal'
+            original = type_content
+            # Find interface/type containing target_type and the property
+            for prop_pattern_type in ['interface', 'type']:
+                if prop_pattern_type == 'interface':
+                    pat = rf"(interface\s+{re.escape(target_type)}\s*\{{)"
+                else:
+                    pat = rf"(type\s+{re.escape(target_type)}\s*=\s*\{{)"
+                match = re.search(pat, type_content)
+                if match:
+                    # Find the closing brace
+                    start = match.end()
+                    depth = 1
+                    end = start
+                    while end < len(type_content) and depth > 0:
+                        if type_content[end] == '{':
+                            depth += 1
+                        elif type_content[end] == '}':
+                            depth -= 1
+                        end += 1
+                    body = type_content[start:end-1]
+
+                    # Find the property that has the mismatch and expand its type
+                    # Look for lines like: status?: TicketStatus;
+                    for literal_v, tgt_t in union_mismatches:
+                        # Find property lines in the body
+                        prop_line_pat = rf"(\s+(\w+)\s*:\s*)([^;\n]+)(;)"
+                        for prop_match in re.finditer(prop_line_pat, body):
+                            prop_name_line = prop_match.group(2)
+                            current_type = prop_match.group(3).strip()
+                            # Check if this property's type is the target type
+                            if tgt_t == current_type or tgt_t in current_type:
+                                new_type = f"{current_type} | '{literal_v}'"
+                                old_full = prop_match.group(0)
+                                new_full = f"{prop_match.group(1)}{new_type}{prop_match.group(4)}"
+                                body = body.replace(old_full, new_full, 1)
+                                type_content = type_content[:start] + body + type_content[end-1:]
+
+            if type_content != original:
+                with open(type_def_path, 'w', encoding='utf-8') as f:
+                    f.write(type_content)
+                rel_path = os.path.relpath(type_def_path, repo_dir).replace("\\", "/")
+                self.fixer._safe_log(
+                    job_id,
+                    f"🧹 Expanded type union in {rel_path} to include missing values",
+                    "Programmatic Fix"
+                )
+                modified_any = True
+                return await self.fixer._commit_programmatic_fix(job_id, rel_path, type_content, github_repo, github_branch)
+
+        return False
+
+    async def _fix_ts_wrong_field_type(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix interface fields with incorrect types that conflict with usage.
+
+        E.g. PaginatedTicketsResponse.data: string when usage expects Ticket[].
+        """
+        if not file_path.endswith(('.ts', '.tsx')):
+            return False
+
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        # Match: Type 'string' is not assignable to type 'Ticket[]'.
+        field_type_mismatches = []
+        for item in missing_items:
+            m = re.search(r"Type\s+'([^']+)'\s+is not assignable to type\s+'([^']+)'", item)
+            if m:
+                actual_type = m.group(1)
+                expected_type = m.group(2)
+                # Only handle cases where actual is a primitive and expected is a complex type
+                if actual_type in ('string', 'number', 'boolean') and (
+                    '[]' in expected_type or expected_type[0].isupper() or '|' not in expected_type
+                ):
+                    field_type_mismatches.append((actual_type, expected_type))
+
+        if not field_type_mismatches:
+            return False
+
+        # Find the interface/type definition that has the wrong field type
+        prefixes = self.fixer._repo_prefixes(repo_dir)
+        frontend_prefix = prefixes["frontend"]
+        base_dir = os.path.join(repo_dir, frontend_prefix, "src", "types") if frontend_prefix else os.path.join(repo_dir, "src", "types")
+
+        # Search type files for interfaces with fields of the wrong type
+        search_dirs = [base_dir]
+        for actual_type, expected_type in field_type_mismatches:
+            type_def_path = None
+            type_content = ""
+
+            search_root = base_dir if os.path.isdir(base_dir) else (os.path.join(repo_dir, frontend_prefix) if frontend_prefix else repo_dir)
+            for root, dirs, files in os.walk(search_root):
+                if 'node_modules' in root:
+                    continue
+                for fname in files:
+                    if not fname.endswith('.ts'):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        fc = f.read()
+                    # Look for a field with the wrong type
+                    if f": {actual_type}" in fc or f":{actual_type}" in fc:
+                        type_def_path = fpath
+                        type_content = fc
+                        break
+                if type_def_path:
+                    break
+
+            if not type_def_path:
+                continue
+
+            # Find and replace the field type
+            original = type_content
+            # Replace : string; with : <expected_type>; in interface/type bodies
+            # Be careful to only replace in the right context
+            for actual_t, expected_t in field_type_mismatches:
+                # Look for patterns like "data: string;" or "totalPages: string;"
+                # within interface/type definitions
+                type_content = re.sub(
+                    rf'(\s+\w+\s*:\s*){re.escape(actual_t)}(\s*;)',
+                    lambda m: f"{m.group(1)}{expected_t}{m.group(2)}",
+                    type_content
+                )
+
+            if type_content != original:
+                with open(type_def_path, 'w', encoding='utf-8') as f:
+                    f.write(type_content)
+                rel_path = os.path.relpath(type_def_path, repo_dir).replace("\\", "/")
+                self.fixer._safe_log(
+                    job_id,
+                    f"🧹 Corrected field types in {rel_path}: {actual_type} → {expected_type}",
+                    "Programmatic Fix"
+                )
+                return await self.fixer._commit_programmatic_fix(job_id, rel_path, type_content, github_repo, github_branch)
+
+        return False
+
+    async def _fix_import_case_mismatch(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix import path case sensitivity mismatches.
+
+        E.g. import from '@/components/ui/Input' when the file is 'input.tsx'.
+        Generic — works for any case mismatch in any import path.
+        """
+        if not file_path.endswith(('.ts', '.tsx', '.js', '.jsx')):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        case_mismatches = []
+        for item in missing_items:
+            m = re.search(r"differs from file name '([^']+)' only in casing", item)
+            if m:
+                correct_path = m.group(1)
+                correct_filename = os.path.basename(correct_path)
+                case_mismatches.append(correct_filename)
+
+        if not case_mismatches:
+            return False
+
+        modified = False
+        lines = content.splitlines()
+        new_lines = []
+
+        for line in lines:
+            new_line = line
+            for correct_filename in case_mismatches:
+                import_match = re.search(r"(from\s+['\"])([^'\"]+?)(['\"])", line)
+                if import_match:
+                    import_path = import_match.group(2)
+                    import_filename = import_path.split('/')[-1]
+                    if import_filename.lower() == correct_filename.lower() and import_filename != correct_filename:
+                        correct_import_path = import_path.rsplit('/', 1)[0] + '/' + correct_filename
+                        new_line = line.replace(import_path, correct_import_path)
+                        modified = True
+            new_lines.append(new_line)
+
+        if not modified:
+            return False
+
+        fixed_content = '\n'.join(new_lines)
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(fixed_content)
+
+        self.fixer._safe_log(
+            job_id,
+            f"🧹 Fixed import case mismatch in {file_path}",
+            "Programmatic Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, fixed_content, github_repo, github_branch)
+
+    async def _fix_component_prop_mismatch(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix component prop contract mismatches.
+
+        E.g. passing 'label' prop to Input component that doesn't accept it.
+        Strategy: add the missing prop to the component's interface.
+        Generic — works for any component prop mismatch pattern.
+        """
+        if not file_path.endswith(('.ts', '.tsx')):
+            return False
+
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        prop_mismatches = []
+        for item in missing_items:
+            m = re.search(r"is not assignable to type\s+'IntrinsicAttributes\s*&\s*(\w+)", item)
+            if m:
+                component_props = m.group(1)
+                props_match = re.search(r"Type\s+'\{([^}]+)\}'", item)
+                if props_match:
+                    props_str = props_match.group(1)
+                    extra_props = re.findall(r'(\w+):\s*([^;,\n]+)', props_str)
+                    prop_mismatches.append((component_props, extra_props))
+
+        if not prop_mismatches:
+            return False
+
+        prefixes = self.fixer._repo_prefixes(repo_dir)
+        frontend_prefix = prefixes["frontend"]
+
+        for component_props, extra_props in prop_mismatches:
+            component_name = component_props.replace('Props', '').replace('Interface', '')
+            component_file = None
+            component_content = ""
+            frontend_root = os.path.join(repo_dir, frontend_prefix) if frontend_prefix else repo_dir
+
+            for root, dirs, files in os.walk(frontend_root):
+                if 'node_modules' in root:
+                    continue
+                for fname in files:
+                    if not fname.endswith(('.tsx', '.ts')):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, 'r', encoding='utf-8') as f:
+                            fc = f.read()
+                        if f"interface {component_props}" in fc or f"type {component_props}" in fc:
+                            component_file = fpath
+                            component_content = fc
+                            break
+                    except Exception:
+                        pass
+                if component_file:
+                    break
+
+            if not component_file:
+                continue
+
+            modified = False
+
+            for prop_name, prop_type in extra_props:
+                if prop_name in ('id', 'className', 'style', 'onClick', 'onChange', 'onFocus', 'onBlur',
+                                 'value', 'defaultValue', 'placeholder', 'type', 'name', 'disabled',
+                                 'required', 'readOnly', 'autoFocus', 'autoComplete', 'checked',
+                                 'min', 'max', 'minLength', 'maxLength', 'step', 'pattern', 'title'):
+                    continue
+
+                if re.search(rf"\b{re.escape(prop_name)}\s*:", component_content):
+                    continue
+
+                interface_pat = re.compile(rf"(interface\s+{re.escape(component_props)}\s*\{{)([^}}]*)(\}})", re.DOTALL)
+                match = interface_pat.search(component_content)
+                if match:
+                    body = match.group(2)
+                    ts_type = prop_type.strip() if prop_type else "string"
+                    new_prop_line = f"\n  {prop_name}?: {ts_type};"
+                    new_body = body.rstrip() + new_prop_line + "\n"
+                    component_content = component_content[:match.start(2)] + new_body + component_content[match.end(2):]
+                    modified = True
+
+            if modified:
+                with open(component_file, 'w', encoding='utf-8') as f:
+                    f.write(component_content)
+                rel_path = os.path.relpath(component_file, repo_dir).replace("\\", "/")
+                self.fixer._safe_log(
+                    job_id,
+                    f"🧹 Added missing props to {component_props} in {rel_path}",
+                    "Programmatic Fix"
+                )
+                return await self.fixer._commit_programmatic_fix(job_id, rel_path, component_content, github_repo, github_branch)
+
+        return False
+
+    async def _fix_import_name_mismatch(self, file_path, file_info, github_repo, github_branch, repo_dir, job_id):
+        """Fix import name mismatches where the wrong name is imported.
+
+        E.g. import { getAuthToken } from '@/lib/auth' when the export is 'getToken'.
+        Rewrites the import to use the correct export name.
+        Generic — works for any import/export name mismatch with 'Did you mean' hint.
+        """
+        if not file_path.endswith(('.ts', '.tsx', '.js', '.jsx')):
+            return False
+
+        local = os.path.join(repo_dir, file_path)
+        content = file_info.get('content', '')
+        if not content and os.path.exists(local):
+            with open(local, 'r', encoding='utf-8') as f:
+                content = f.read()
+        if not content:
+            return False
+
+        missing_items = [str(err) for err in file_info.get('missing', [])]
+        fixes = []
+        for item in missing_items:
+            # Match: 'getAuthToken' not found in '@/lib/auth'. Did you mean 'getToken'?
+            m = re.search(r"'(\w+)'\s+not found in\s+'[^']+'\.\s+Did you mean\s+'(\w+)'", item)
+            if m:
+                fixes.append((m.group(1), m.group(2)))
+                continue
+            # Match: Module '"@/lib/auth"' has no exported member 'clearAuthToken'.
+            m2 = re.search(r"Module\s+'[^']+'\s+has no exported member\s+'(\w+)'", item)
+            if m2:
+                wrong_name = m2.group(1)
+                # Try to find a similar export in the source module
+                # Extract the module path from the error
+                mod_m = re.search(r"Module\s+'([^']+)'", item)
+                if mod_m:
+                    mod_path = mod_m.group(1).replace('@/', 'src/')
+                    source_file = os.path.join(repo_dir, 'frontend', mod_path)
+                    if os.path.exists(source_file):
+                        with open(source_file, 'r', encoding='utf-8') as f:
+                            src = f.read()
+                        exports = re.findall(r"\bexport\s+(?:async\s+)?(?:function|const|let|var|class)\s+(\w+)", src)
+                        exports += re.findall(r"\bexport\s*\{([^}]+)\}", src)
+                        for exp in exports:
+                            exp = exp.strip()
+                            if ' as ' in exp:
+                                exp = exp.split(' as ')[-1].strip()
+                            norm_wrong = wrong_name.lower().replace('_', '')
+                            norm_exp = exp.lower().replace('_', '')
+                            if norm_exp in norm_wrong or norm_wrong in norm_exp:
+                                fixes.append((wrong_name, exp))
+                                break
+
+        if not fixes:
+            return False
+
+        original = content
+        modified = False
+        for wrong_name, correct_name in fixes:
+            # Replace in named imports: import { wrong_name } -> import { correct_name }
+            pattern = rf"\b{re.escape(wrong_name)}\b"
+            if re.search(pattern, content):
+                content = re.sub(pattern, correct_name, content)
+                modified = True
+
+        if not modified or content == original:
+            return False
+
+        with open(local, 'w', encoding='utf-8') as f:
+            f.write(content)
+
+        self.fixer._safe_log(
+            job_id,
+            f"🧹 Fixed import name mismatch in {file_path}: {', '.join(f'{w}->{c}' for w, c in fixes)}",
+            "Programmatic Fix"
+        )
+        return await self.fixer._commit_programmatic_fix(job_id, file_path, content, github_repo, github_branch)

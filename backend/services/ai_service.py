@@ -428,7 +428,7 @@ class AIService:
         
         raise last_exception
     
-    async def generate_work_plan(self, story_description: str, subtasks: List[Dict[str, Any]] = None) -> str:
+    async def generate_work_plan(self, story_description: str, subtasks: List[Dict[str, Any]] = None, min_backend_subtasks: int = None, min_frontend_subtasks: int = None) -> str:
         """Generate a structured work plan based on story description."""
         if not self.api_key:
             return """# Work Plan
@@ -441,6 +441,19 @@ Desc: Build main functionality
 SUBTASK: Add Tests
 Desc: Create test coverage
 ---"""
+        
+        # Build per-domain minimum instruction from UI overrides
+        domain_min_instruction = ""
+        if min_backend_subtasks is not None or min_frontend_subtasks is not None:
+            backend_req = f"at least {min_backend_subtasks} [Backend] subtasks" if min_backend_subtasks is not None else "sufficient [Backend] subtasks"
+            frontend_req = f"at least {min_frontend_subtasks} [Frontend] subtasks" if min_frontend_subtasks is not None else "sufficient [Frontend] subtasks"
+            domain_min_instruction = (
+                f"\n🎯 MINIMUM SUBTASK REQUIREMENTS (enforced by pipeline):\n"
+                f"- You MUST include {backend_req}.\n"
+                f"- You MUST include {frontend_req}.\n"
+                f"- [Fullstack] subtasks do NOT count toward these domain minimums.\n"
+                f"- Each subtask should be focused on a single implementation area.\n"
+            )
         
         prompt = f"""You are an expert Autonomous Developer Agent.
 
@@ -461,7 +474,7 @@ CRITICAL PLANNING RULES:
 - Every selected skill must be represented by one or more subtasks.
 - If both backend and frontend requirements are present, include subtasks for BOTH domains and their integration.
 - Do not skip testing/validation/quality tasks when required by skills.
-
+{domain_min_instruction}
 Format your response with SUBTASK markers exactly like this:
 
 SUBTASK: 1. [Short summary title]
